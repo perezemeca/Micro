@@ -1,0 +1,938 @@
+#include "mbed.h"
+
+/**********************************************************************************/
+/************************************ Macros **************************************/
+/**********************************************************************************/
+#define SUMA            flag1.bit.b0
+#define ADCTIMEOUT      flag1.bit.b1
+#define ECHORISE        flag1.bit.b2
+#define ECHOPULSE       flag1.bit.b3
+#define SERVOMOVED      flag1.bit.b4
+#define CASO1           flag1.bit.b5
+#define CASO2           flag1.bit.b6
+#define CASO3           flag1.bit.b7
+
+#define S1              flag2.bit.b0
+#define S2              flag2.bit.b1
+#define CASO1READY      flag2.bit.b2
+#define CASO2READY      flag2.bit.b3
+#define CASO3READY      flag2.bit.b4
+#define Girar           flag2.bit.b5
+#define Avanzar         flag2.bit.b6
+
+#define caso1       0           //Seguir linea
+#define caso2       1           //Encontar-Sacar lata
+#define caso3       2           //Encontrar linea
+#define S1MAX       7000
+#define S2MAX       6000
+#define POTMIN      175
+#define POTMAX      330
+
+/**********************************************************************************/
+/**********************************************************************************/
+/**********************************************************************************/
+
+/**********************************************************************************/
+/*************************** Declaración de puertos *******************************/
+/**********************************************************************************/
+DigitalOut LED(PC_13);
+DigitalIn INICIO (D1);
+
+DigitalOut TRIGGER(PB_13);
+InterruptIn ECHO(PB_12);
+Timeout TimeTriggerPulse;
+
+InterruptIn HL(PB_9);
+InterruptIn HR(PB_8);
+
+PwmOut ENA(PB_5);
+DigitalOut IN1(PB_6);
+DigitalOut IN2(PB_7);
+PwmOut ENB(PA_8);
+DigitalOut IN3(PB_15);
+DigitalOut IN4(PB_14);
+
+PwmOut SERVO(D6);
+
+AnalogIn AI0(A0);
+AnalogIn AI2(A1);
+
+Serial PC(D8, D2);
+
+/**********************************************************************************/
+/**********************************************************************************/
+/**********************************************************************************/
+
+/**********************************************************************************/
+/********************************** Variables *************************************/
+/**********************************************************************************/
+
+typedef struct {
+    uint8_t *Buff;
+    uint8_t header;
+    uint8_t IWr;
+    uint8_t IRe;
+    uint8_t iData;                                                              //iData[indice para saber donde comienzan mis datos; rx.ckst[]
+    uint8_t timeout;
+    uint8_t cks;
+    uint8_t nbytes;                                                             //Nbytes[cantidad de bytes de mi buffer]
+    uint8_t maskSize;
+    uint8_t ISCMD; 
+} _Rx;
+
+typedef struct {
+    uint8_t *Buff;
+    uint8_t IWr;
+    uint8_t IRe;
+    uint8_t length;
+    uint8_t maskSize;
+} _Tx;
+
+typedef union {
+    struct {
+        uint8_t b0:1;
+        uint8_t b1:1;
+        uint8_t b2:1;
+        uint8_t b3:1;
+        uint8_t b4:1;
+        uint8_t b5:1;
+        uint8_t b6:1;
+        uint8_t b7:1;
+    } bit;
+    uint8_t byte;
+} _flag;
+
+typedef union{
+    uint8_t     u8[4];
+    int8_t      i8[4];
+    uint16_t    u16[2];
+    int16_t     i16[2];
+    uint32_t    u32;
+    int32_t     i32;
+    float       f;
+}_work;
+
+Ticker Ticker10ms;
+Timer TimeHCSR04;
+
+uint8_t time100ms,TimeOutIncio;
+
+_flag flag1, flag2;
+
+volatile _Rx rx;
+_Tx tx;
+_work w;
+
+volatile uint8_t bufRX[256];
+uint8_t bufTX[256];
+
+uint16_t bufADC[4];
+uint8_t iAdc;
+
+uint8_t time10ms, timeOutAdc;
+
+uint8_t timeOutDistancia;
+uint32_t distancia_us;
+
+uint8_t timeOutHLR;
+uint32_t countHL, countHL_2, countHR, speedM1, speedM2, Pot_1, Pot_2;
+int32_t M1Power, M2Power;
+
+uint16_t servoAngle, servoAngle_2;
+uint8_t  timeOutServoMove, TimeLata;
+
+const char FIRMWARE[] = "20201125_v02b01";
+
+/**********************************************************************************/
+/**********************************************************************************/
+/**********************************************************************************/
+
+/**********************************************************************************/
+/********************************** Funciones *************************************/
+/**********************************************************************************/
+
+void Automata(uint8_t caso);
+void Control(int32_t pot1, int32_t pot2, uint8_t caso);
+void LeerSensoresIR();
+void SeguidorDeLinea();
+void Servo();
+void SacaLata();
+
+void HRInt();
+void HLInt();
+
+void ECHOInt();
+void OnTimeTriggerPulse();
+
+void On10ms();
+
+void OnRxChar();                                                                // Funcion de interrupcion que se utiliza cada vez que haya un dato en el buffer de recepcion
+
+void DecodeHeader(_Rx *RX);
+void DecodeCmd(_Rx *RX);
+
+void PutBuffOnTx(_Tx *TX, uint8_t *buf, uint8_t length);
+void PutByteOnTx(_Tx *TX, uint8_t value);
+void PutHeaderOnTx(_Tx *TX, uint8_t id, uint8_t lcmd);
+void PutcksOnTx(_Tx *TX);
+void PutStrOnTx(_Tx *TX, const char *str);
+
+uint8_t GetByteFromRx(_Rx *RX, int8_t pre, int8_t pos);
+
+/***********************************************************************************/
+/**************************** Interrupciones horquillas ****************************/
+/***********************************************************************************/
+
+void HRInt(){
+    countHR++;
+}
+void HLInt(){
+    countHL++;
+    countHL_2++;                                                                //Utilizada para controlar giro de rueda en metodo automata
+}
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/***************************** Control acustico HCSR04 *****************************/
+/***********************************************************************************/
+
+void ECHOInt()
+{
+    if(ECHORISE) {
+        TimeHCSR04.reset();
+        TimeHCSR04.start();
+        ECHORISE = 0;
+    } 
+    else {
+        distancia_us = TimeHCSR04.read_us();
+        TimeHCSR04.stop();
+        if(distancia_us > 6000)                                                 //distancia_us > 30000 500CM - distancia_us < 150 2CM
+            distancia_us = 0x00FFFFFF;
+        ECHOPULSE = 0;
+    }
+}
+void OnTimeTriggerPulse()
+{
+    TRIGGER = 0;
+    ECHORISE = 1;
+}
+void Do100ms(){
+    timeOutDistancia--;
+    if(!timeOutDistancia) {
+        if(ECHOPULSE) {
+            ECHOPULSE = 0;
+            TimeHCSR04.stop();
+            distancia_us = 0xFFFFFFFF;
+        }
+        timeOutDistancia = 2;
+        TRIGGER = 1;
+        TimeTriggerPulse.attach_us(&OnTimeTriggerPulse, 10);
+        ECHOPULSE = 1;
+    }
+    /*
+     * TimeOut para darle tiempo al servo para moverse
+     */
+    if(timeOutServoMove){
+        timeOutServoMove--;
+        if(!timeOutServoMove)
+            SERVOMOVED = 1;
+    }
+}
+
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/***************** Función para controlar funcionalidades del auto *****************/
+/***********************************************************************************/
+
+void On10ms()
+{
+    /*
+     * Control de TimeOuts para decodificar datos, conversion Adc y velocidad de motores
+     * Lectura de sensores IR -> LeerSensoresIR()
+     * Control de tecla INICIO presionada para función automata
+     * Control de diferentes casos de la función automata
+     *
+     */
+    time100ms++;
+    if(rx.header) {                                                             //Si tengo algo distinto de cero, significa que estoy decodificando
+        rx.timeout--;                                                           //entonces decremento
+        if(!rx.timeout)                                                         //si timeout == 0
+            rx.header = 0;                                                      //reinicio la decodificacion porque se demoro mucho
+    }
+    timeOutAdc--;
+    if(!timeOutAdc){
+        timeOutAdc = 5;
+        ADCTIMEOUT = 1;
+    }
+    timeOutHLR--;
+    if(!timeOutHLR){
+        speedM1 = countHL;
+        speedM2 = countHR;
+        countHL = 0;
+        countHR = 0;
+        timeOutHLR = 50; 
+    }
+    
+    LeerSensoresIR();
+    
+    if(INICIO == 1){
+        TimeOutIncio++;
+        if(TimeOutIncio == 20 && !CASO1READY){                                  //Tecla presionada por mas de 200ms y si el caso finalizo
+            CASO1 = 1;
+        }
+        if(TimeOutIncio == 40 && !CASO2READY){
+            CASO2 = 1;
+            countHL_2 = 0;
+        }
+        if(TimeOutIncio == 60 && !CASO3READY){
+            CASO3 = 1;
+            TimeOutIncio = 0;
+        }
+    }
+    if(CASO1){
+        Automata(caso1);
+    }
+    if(CASO2){
+        if(countHL_2 <= 20 && CASO2READY){
+            Control(300,300,1);                                                 //Una vez que se saca el objeto de la pista, vuelve a entrar.
+        }
+        if(CASO2READY && countHL_2 > 20){                                       //Si la orquilla izquierda cuenta 20 pulsos (una vuelta de rueda), termina el segundo caso
+            CASO2 = 0;
+            Control(0,0,2);
+            return;
+        }
+        if(!CASO2READY){
+            if(countHL_2 <= 40){
+                Control(300,0,3);
+            }
+            else{
+                TimeLata++;
+                Automata(caso2);                
+            }
+        }
+    }
+    if(CASO3){
+        Automata(caso3);
+    }
+}
+
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/************************* Control de funciones automatas **************************/
+/***********************************************************************************/
+
+void Automata(uint8_t caso){
+    switch (caso){
+        case 0:                                                                 //SEGUIR LINEA - ENCONTRAR LATA - distancia_us < 150 2CM - caso1
+            if(distancia_us < 350){
+                Control(0,0,2);
+                CASO1READY = 1;
+                CASO2READY = 0;
+                CASO1 = 0;
+            }
+            else{
+                SeguidorDeLinea();
+            }
+        break;
+        case 1:                                                                 //ENCONTRAR LATA
+            if(TimeLata >= 8 && !Avanzar){                                      
+                TimeLata = 0;
+                SacaLata();                                                     //Muevo el servo para encontrar el objeto
+            }
+            if(distancia_us < 400 && (!S1 || !S2)){                             //Encontro la lata y la saco de la linea
+                countHL_2 = 0;
+                CASO2READY = 1;
+                CASO3READY = 0;
+                break;
+            }
+            /*
+             * Obstaculo fuera de rango detiene el auto
+             */
+            if(distancia_us > 4500){                                                    //Parado
+                Control(0,0,2);
+                Avanzar = 0;
+            }
+        break;
+        
+        case 2:                                                                 //ENCONTRAR LINEA - SEGUIR LINEA - ENCONTRAR LATA
+            if(distancia_us < 250){
+                Control(0,0,2);
+                CASO1READY = 0;
+                CASO3READY = 1;
+                CASO3 = 0;
+            }
+            else{
+                SeguidorDeLinea();
+            }
+        break;
+    }
+}
+
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/******************** Funcion para encontrar y sacar obstaculo *********************/
+/***********************************************************************************/
+
+void SacaLata(){
+    /*
+     * Se verifica posicion del servo para comenzar a incrementar o decrementar pulsewidth_us.
+     * Se verifica distancia_us del objeto < 4000 o < 80[cm] para mover el auto.
+     * En función del valor de pulsewidth_us (indica la posicion del servo), se posiciona el auto.
+     */
+    if(w.u16[0] >= 2500) SUMA = 0;
+    if(w.u16[0] <= 500) SUMA = 1;
+    if(SUMA){
+        SERVO.pulsewidth_us(w.u16[0]);
+        w.u16[0] += 15;
+    }
+    if(!SUMA){
+        SERVO.pulsewidth_us(w.u16[0]);
+        w.u16[0] -= 15;
+    }
+    if(distancia_us < 4500){
+        if(w.u16[0] == 1500){
+            Control(280,280,0);                                                 //Adelante
+            Avanzar = 1;
+        }
+        if(w.u16[0] < 1500){// && w.u16[0] % 100 == 0){                              //horario
+            Control(260,260,4);
+        }
+        if(w.u16[0] > 1500){// && w.u16[0] % 100 == 0){                              //antihorario
+            Control(260,260,3);
+        }
+    }
+}
+
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/************************* Funcion para seguir linea negra *************************/
+/***********************************************************************************/
+
+void SeguidorDeLinea(){
+    if(!S1 && !S2){                                                             //Adelante
+        if(Pot_1 <= 250){
+            Control(250,250,0);
+        }
+        else{            
+            Pot_1-=5;
+            Control(Pot_1,Pot_1,0);
+        }
+        Pot_2 = POTMIN;                                                         //POTMIN = 175
+    }
+    if(S1 && S2){               
+        if(CASO3){                                                              //Adelante        
+            Control(250,250,0);
+            Pot_2 = POTMIN;
+        }
+        else{                                                                   //Atras
+            Control(POTMAX,POTMAX,1);
+            Pot_2 = POTMIN;
+        }
+    }
+    if(S1 && !S2){                                                              //Girar horario
+        Pot_2+=3;
+        Control(Pot_2,Pot_1-10,3); //3
+        Pot_1 = POTMAX;                                                         //POTMAX = 330
+    }
+    if(!S1 && S2){                                                              //Girar antihorario
+        Pot_2+=3;
+        Control(Pot_1-10,Pot_2,4); //4
+        Pot_1 = POTMAX;
+    }
+}
+
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/************* Función para controlar sentido y direccion de motores ***************/
+/***********************************************************************************/
+void Control(int32_t pot1, int32_t pot2, uint8_t caso){
+    switch (caso){
+        case 0:                                                                 //Adelante
+            IN1.write(1);
+            IN2.write(0);
+            IN3.write(1);
+            IN4.write(0);
+        break;
+        case 1:                                                                 //Atras
+            IN1.write(0);
+            IN2.write(1);
+            IN3.write(0);
+            IN4.write(1);
+        break;
+        case 2:                                                                 //Parado
+            IN1.write(0);
+            IN2.write(0);
+            IN3.write(0);
+            IN4.write(0);  
+        break;
+        case 3:                                                                 //Horario
+            IN1.write(1);
+            IN2.write(0);
+            IN3.write(0);
+            IN4.write(1);  
+        break;
+        case 4:                                                                 //antiHorario
+            IN1.write(0);
+            IN2.write(1);
+            IN3.write(1);
+            IN4.write(0); 
+        break;
+    }
+    ENA.pulsewidth_us(pot1);
+    ENB.pulsewidth_us(pot2);
+}
+
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/***************** Funcion para secuencia de movimiento del servo ******************/
+/***********************************************************************************/
+void Servo(){
+    
+    for(w.u16[0] = 500; w.u16[0]<2500; w.u16[0] += 20){
+        SERVO.pulsewidth_us(w.u16[0]);
+        wait_ms(40);
+    }
+    
+    timeOutServoMove = 0;
+    
+    for(w.u16[0] = 2500; w.u16[0]>=500; w.u16[0] -= 20){
+        SERVO.pulsewidth_us(w.u16[0]);
+        wait_ms(40);
+    }
+}
+
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/************************** Función para leer sensores IR **************************/
+/***********************************************************************************/
+void LeerSensoresIR(){
+    if(ADCTIMEOUT){
+        ADCTIMEOUT = 0;
+        switch(iAdc){
+            case 0:
+                bufADC[iAdc] = AI0.read_u16();
+                if(bufADC[iAdc] > S1MAX){
+                    S1 = 1;
+                }
+                else {
+                    S1 = 0;
+                }
+            break;    
+            case 1:
+                bufADC[iAdc] = AI2.read_u16();
+                if(bufADC[iAdc] > S2MAX){
+                    S2 = 1;
+                }
+                else {
+                    S2 = 0;
+                }
+            break;
+        }
+        iAdc++;
+        if(iAdc == 2){
+            iAdc = 0;
+        }
+    }
+}
+
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/******************* Funciones para comnicacion por puerto serie *******************/
+/***********************************************************************************/
+void PutBuffOnTx(_Tx *TX, uint8_t *buf, uint8_t length)
+{
+    uint8_t i;
+
+    for(i=0; i<length; i++) {
+        TX->Buff[TX->IWr++] = buf[i];
+        TX->IWr &= TX->maskSize;
+    }
+}
+
+uint8_t GetByteFromRx(_Rx *RX, int8_t pre, int8_t pos){
+    uint8_t aux;
+
+    RX->iData += pre;
+    RX->iData &= RX->maskSize;
+    aux = RX->Buff[RX->iData];
+    RX->iData += pos;
+    RX->iData &= RX->maskSize;
+
+    return aux;
+}
+
+void OnRxChar()
+{
+    while(PC.readable()) {
+        rx.Buff[rx.IWr++] = PC.getc();
+        rx.IWr &= rx.maskSize;                                                  // Enmascaro el indice  de escritura - Cuando llega a 63 se pone en 0
+    }
+}
+
+void DecodeHeader(_Rx *RX)
+{
+    uint8_t i;
+    i = RX->IWr;
+
+    while(RX->IRe != i) {
+        switch(RX->header) {
+            case 0:
+                if(RX->Buff[RX->IRe] == 'U') {
+                    RX->header = 1;
+                    RX->timeout = 5;
+                }
+                break;
+            case 1:
+                if(RX->Buff[RX->IRe] == 'N') {
+                    RX->header = 2;
+                } else {
+                    RX->header = 0;
+                    RX->IRe --;
+                }
+                break;
+            case 2:
+                if(RX->Buff[RX->IRe] == 'E') {
+                    RX->header = 3;
+                } else {
+                    RX->header = 0;
+                    RX->IRe --;
+                }
+                break;
+            case 3:
+                if(RX->Buff[RX->IRe] == 'R') {
+                    RX->header = 4;
+                } else {
+                    RX->header = 0 ;
+                    RX->IRe --;
+                }
+                break;
+            case 4:
+                RX->nbytes = RX->Buff[RX->IRe];
+                RX->header = 5;
+                break;
+            case 5:
+                if(RX->Buff[RX->IRe] == ':') {
+                    RX->header = 6;
+                    RX->iData = RX->IRe + 1;
+                    RX->iData &= RX->maskSize;
+                    RX->cks = 'U' ^ 'N' ^ 'E' ^ 'R' ^ ':' ^ RX->nbytes;
+
+                } else {
+                    RX->header = 0 ;
+                    RX->IRe --;
+                }
+                break;
+            case 6:
+                RX->nbytes--;
+                if(RX->nbytes > 0) {
+                    RX->cks ^= RX->Buff[RX->IRe];
+                } else {
+                    RX->header = 0 ;
+                    if(RX->cks == RX->Buff[RX->IRe]) {
+                        RX->ISCMD = 1;
+                    }
+                }
+                break;
+
+            default:
+                RX->header = 0;
+                break;
+        }
+        RX->IRe &= RX->maskSize;
+        RX->IRe ++;
+        RX->IRe &= RX->maskSize;                                                // Enmascaro el indice de lectura - Cuando llega a 63 se pone en 0
+    }
+}
+
+void DecodeCmd(_Rx *RX)
+{
+    RX->ISCMD = 0;
+
+    switch(RX->Buff[RX->iData]){
+        /*
+         * Comando para enviar datos IR
+         */
+        case 0xA0:                                                              //Sensores analogicos
+            PutHeaderOnTx(&tx, 0xA0, 5);
+            PutBuffOnTx(&tx, (uint8_t *)bufADC, 4);
+            PutcksOnTx(&tx);
+        break;
+        /*
+         * Comando para recibir valor de potencia y sentido de giro de motores
+         */
+        case 0xA1:                                                              //Motores
+            w.u8[0] = GetByteFromRx(RX, 1, 0);
+            w.u8[1] = GetByteFromRx(RX, 1, 0);
+            w.u8[2] = GetByteFromRx(RX, 1, 0);
+            w.u8[3] = GetByteFromRx(RX, 1, 0);
+            M1Power = w.i32;
+            w.u8[0] = GetByteFromRx(RX, 1, 0);
+            w.u8[1] = GetByteFromRx(RX, 1, 0);
+            w.u8[2] = GetByteFromRx(RX, 1, 0);
+            w.u8[3] = GetByteFromRx(RX, 1, 0);
+            M2Power = w.i32;
+            ENA.pulsewidth_us(0);
+            ENB.pulsewidth_us(0);
+            if(M1Power < 0){
+                IN1.write(0);
+                IN2.write(1);
+                M1Power = -M1Power;
+            }
+            else{
+                IN1.write(1);
+                IN2.write(0);
+            }
+            ENA.pulsewidth_us(M1Power);
+            if(M2Power < 0){
+                IN3.write(0);
+                IN4.write(1);
+                M2Power = -M2Power;
+            }
+            else{
+                IN3.write(1);
+                IN4.write(0);
+            }
+            ENB.pulsewidth_us(M2Power);
+            PutHeaderOnTx(&tx, 0xA1, 2);
+            PutByteOnTx(&tx, 0x0D);        
+            PutcksOnTx(&tx);
+        break;
+        /*
+         * Comando para recibir dato del ángulo de posicionamiento del servo
+         */
+        case 0xA2:                                                              //Servo
+            w.i8[0] = GetByteFromRx(RX, 1, 0);
+            if(w.i8[0]<-90 || w.i8[0]>90)
+                w.i8[0] = 0;
+            servoAngle = ((w.i8[0] - (-90)) * (2500 - 500) / (90 - (-90)) + 500);
+            SERVO.pulsewidth_us(servoAngle);
+            timeOutServoMove = 5;
+            PutHeaderOnTx(&tx, 0xA2, 2);
+            PutByteOnTx(&tx, 0x0D);
+            PutcksOnTx(&tx);
+        break;
+        /*
+         * Comando para enviar datos de acustico HCSR04
+         */
+        case 0xA3:                                                              //Ultrasonido
+            PutHeaderOnTx(&tx, 0xA3, 5);
+            PutBuffOnTx(&tx, (uint8_t *)&distancia_us, 4);
+            PutcksOnTx(&tx);
+        break;
+        /*
+         * Comando para enviar datos de horquillas
+         */
+        case 0xA4:                                                              //Velocidad
+            PutHeaderOnTx(&tx, 0xA4, 9);
+            PutBuffOnTx(&tx, (uint8_t *)&speedM1, 4);
+            PutBuffOnTx(&tx, (uint8_t *)&speedM2, 4);
+            PutcksOnTx(&tx);
+        break;
+        /*
+         * Comando para enviar firmware
+         */
+        case 0xF1:                                                              //Version de firmware
+            PutHeaderOnTx(&tx, 0xF1, 16);
+            PutStrOnTx(&tx, FIRMWARE);
+            PutcksOnTx(&tx);
+        break;
+        /*
+         * Comando para enviar alive
+         */
+        case 0xF0:                                                              //Alive
+            PutHeaderOnTx(&tx, 0xF0, 2);
+            PutByteOnTx(&tx, 0x0D);
+            PutcksOnTx(&tx);
+            break;
+        /*
+         * Comando para enviar aviso de error
+         */
+        default:
+            PutHeaderOnTx(&tx, 0xFF, 1);
+            PutcksOnTx(&tx);
+            break;
+    }
+}
+
+void PutStrOnTx(_Tx *TX, const char *str)
+{
+    uint8_t i = 0;
+
+    while(str[i]) {
+        TX->Buff[TX->IWr++] = str[i++];
+        TX->IWr &= TX->maskSize;
+    }
+}
+
+void PutByteOnTx(_Tx *TX, uint8_t value)
+{
+    TX->Buff[TX->IWr++] = value;
+    TX->IWr &= TX->maskSize;
+}
+
+void PutHeaderOnTx(_Tx *TX, uint8_t id, uint8_t lcmd)
+{
+    TX->Buff[TX->IWr++] = 'U';
+    TX->IWr &= TX->maskSize;
+    TX->Buff[TX->IWr++] = 'N';
+    TX->IWr &= TX->maskSize;
+    TX->Buff[TX->IWr++] = 'E';
+    TX->IWr &= TX->maskSize;
+    TX->Buff[TX->IWr++] = 'R';
+    TX->IWr &= TX->maskSize;
+    TX->length = lcmd;
+    TX->Buff[TX->IWr++] = lcmd + 1;                                             //lcmd cantidad de datos: id+payload+cks
+    TX->IWr &= TX->maskSize;
+    TX->Buff[TX->IWr++] = ':';
+    TX->IWr &= TX->maskSize;
+    TX->Buff[TX->IWr++] = id;
+    TX->IWr &= TX->maskSize;
+}
+void PutcksOnTx(_Tx *TX)                                                        //Esta funcion se llama despues de haber cargado el payload
+{
+    uint8_t cks, i;
+
+    cks = 0;
+    i = TX->length + 6;
+    i = TX->IWr - i;
+    i &= TX->maskSize;
+    while(i != TX->IWr) {
+        cks ^= TX->Buff[i++];
+        i &= TX->maskSize;
+    }
+
+    TX->Buff[TX->IWr++] = cks;
+    TX->IWr &= TX->maskSize;
+}
+
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+int main()
+{
+    time100ms = 0;
+    TimeOutIncio = 0;
+    TimeLata = 0;
+    countHL_2 = 0;
+    LED = 0;
+
+    flag1.byte = 0;
+    flag2.byte = 0;
+    CASO2READY = 1;
+    CASO3READY = 1;
+    
+    rx.Buff = (uint8_t *)bufRX;
+    rx.IWr = 0;
+    rx.IRe = 0;
+    rx.header = 0;
+    rx.maskSize = 32-1;
+    rx.ISCMD = 0;
+
+    tx.Buff = bufTX;
+    tx.IWr = 0;
+    tx.IRe = 0;
+    tx.maskSize = 32-1;
+    
+    timeOutAdc = 5;
+    iAdc = 0;
+
+    Ticker10ms.attach_us(&On10ms, 10000);
+
+    HL.fall(&HLInt);
+    HR.fall(&HRInt);
+    
+    ECHORISE = 1;
+    ECHO.rise(&ECHOInt);
+    ECHO.fall(&ECHOInt);
+    timeOutDistancia = 2;
+    
+    SERVO.period_us(20000);
+    SERVO.pulsewidth_us(500);
+    SERVOMOVED = 0;
+    
+    IN1.write(0);
+    IN2.write(0);
+    ENA.period_us(1000);
+    IN3.write(0);
+    IN4.write(0);
+    ENB.period_us(1000);
+    Pot_1 = POTMAX;
+    
+    Servo();
+    
+    SERVO.pulsewidth_us(1500);
+    servoAngle_2 = 1500;
+    
+    PC.baud(115200);
+    PC.attach(&OnRxChar, Serial::RxIrq);
+
+    wait_ms(1000);
+    LED = 0;
+    wait_ms(1000);
+    LED = 1;
+    wait_ms(1000);
+    LED = 0;
+    wait_ms(1000);
+    LED = 1;
+    PutHeaderOnTx(&tx, 0xF0, 2);
+    PutByteOnTx(&tx, 0x0D);
+    PutcksOnTx(&tx);
+
+    while(1) {
+
+        if(time100ms >= 10) {
+            LED = !LED;
+            time100ms = 0;
+            Do100ms();
+        }
+
+        if(rx.IWr != rx.IRe) {                                                  //Si tengo datos en el buffer --> Entonces decodifico lo que tengo
+            DecodeHeader((_Rx *)&rx);
+        }
+
+        if(rx.ISCMD) {
+            DecodeCmd((_Rx *)&rx);
+        }
+
+        if(tx.IWr != tx.IRe) {
+            if(PC.writable() ) {
+                PC.putc(tx.Buff[tx.IRe++]);
+                tx.IRe &= tx.maskSize;
+            }
+        }
+        
+        if(SERVOMOVED){
+            SERVOMOVED = 0;
+            PutHeaderOnTx(&tx, 0xA2, 2);
+            PutByteOnTx(&tx, 0x0A);
+            PutcksOnTx(&tx);
+        }
+    }
+}
