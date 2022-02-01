@@ -93,7 +93,10 @@ const char CIPSEND2[]={'\r','\n','\r','\n','O','K','\r','\n','>',};
 const char CIPSEND3[]="Recv";
 const char CIPSEND4[]={ "bytes\r\n\r\nSEND OK\r\n"};
 
-volatile uint32_t timeOutms, On100ms, On200ms, On500ms, On4000ms, Count100ms, Count200ms, Count500ms, Count4000ms;
+const int COORD_SENSORES[]={-4,-3,-2,-1,1,2,3,4};
+static uint8_t FirtScan;
+
+volatile uint32_t timeOutms, On100ms, On200ms, On3000ms, On500ms, Count100ms, Count200ms, Count3000ms, Count500ms;
 
 volatile _Rx RXUSB, RXUSART1;
 _Tx TXUSB, TXUSART1;
@@ -107,6 +110,9 @@ uint8_t txUSBBuff[256], txUSART1Buff[256];
 volatile uint16_t bufADC[32][8];
 volatile uint8_t iAdc;
 
+uint8_t posMINCenter, posMINRight, posMINLeft;
+uint16_t sensorValue;
+float xMin=0,fx2_fx3,fx2_fx1,x2_x1,x2_x3,x2_x1cuad,x2_x3cuad,denominador;
 
 volatile uint16_t PWMA, PWMB;
 volatile uint8_t Kp, Ki, Kd;
@@ -142,6 +148,42 @@ uint8_t DecodeANS(_Rx *RX, const char *str, uint8_t strlen);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+
+float CuadraticAppprox(){						//ALGORITMO CUADRATICO
+	uint16_t aux[10];
+
+	sensorValue = bufADC[iAdc][0];
+
+	posMINCenter=0;
+
+	for(uint8_t c=0; c<8; c++){				//ENCUENTRO LA MAYOR LECTURA
+		if(sensorValue < bufADC[iAdc][c]){
+			sensorValue = bufADC[iAdc][c];
+			posMINCenter = c;
+		}
+		aux[c+1]=bufADC[iAdc][c];
+	}
+
+	posMINCenter+=1;
+	aux[0]=aux[2];
+	aux[9]=aux[7];
+
+	posMINRight=posMINCenter-1;
+	posMINLeft=posMINCenter+1;
+	fx2_fx3=aux[posMINCenter]-aux[posMINRight];
+	fx2_fx1=aux[posMINCenter]-aux[posMINLeft];
+	x2_x1=COORD_SENSORES[posMINCenter]-COORD_SENSORES[posMINLeft];
+	x2_x1cuad=(x2_x1*x2_x1);
+	x2_x3=COORD_SENSORES[posMINCenter]-COORD_SENSORES[posMINRight];
+	x2_x3cuad=(x2_x3*x2_x3);
+	denominador=(2*(x2_x1*fx2_fx3-x2_x3*fx2_fx1));
+	if(denominador!= 0){
+		xMin=COORD_SENSORES[posMINCenter]-( x2_x1cuad*fx2_fx3 - x2_x3cuad*fx2_fx1 ) / denominador;
+	}
+	return -xMin;
+}
+
 void ESP(_Rx *RXUSART1){
 	uint8_t aux,i=0;
 	aux = RXUSART1->iw;
@@ -151,17 +193,20 @@ void ESP(_Rx *RXUSART1){
 				PutStrOnTx(&TXUSART1,AT); //Envio comando AT para ver si responde el ESP
 				PutStrOnTx(&TXUSB,AT);    // Depuracion por USB
 				RXUSART1->state = 1;
-				Count500ms = 500;
+				Count500ms = 5;
 			break;
 
 			case 1: //Leo respuesta
-				if(!Count500ms){
+				if(On500ms){
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_AT);    // Depuracion por USB	solo de prueba
+					}
 					if(RXUSART1->Buff[RXUSART1->ir]==ANS_AT[i]){
 						i++;
 						if(i==10){
 							i=0;
 							RXUSART1->state = 2;
-							On500ms = 1;
+							On500ms = 0;
 						}
 					}
 					else{
@@ -172,7 +217,9 @@ void ESP(_Rx *RXUSART1){
 						RXUSART1->state = 0;
 					}
 					RXUSART1->ir++;
-					PutStrOnTx(&TXUSB,ANS_AT);    // Depuracion por USB
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_AT);    // Depuracion por USB	solo de prueba
+					}
 				}
 			break;
 
@@ -180,17 +227,20 @@ void ESP(_Rx *RXUSART1){
 				PutStrOnTx(&TXUSART1,CWMODE); //Envio comando CWMODE
 				PutStrOnTx(&TXUSB,CWMODE);    // Depuracion por USB
 				RXUSART1->state = 3;
-				Count500ms = 500;
+				Count500ms = 5;
 			break;
 
 			case 3: //Leo respuesta
-				if(!Count500ms){
+				if(On500ms){
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_CWMODE);    // Depuracion por USB
+					}
 					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CWMODE[i]){
 						i++;
 						if(i==19){
 							i=0;
 							RXUSART1->state = 4;
-							On500ms = 1;
+							On500ms = 0;
 						}
 					}
 					else{
@@ -201,7 +251,9 @@ void ESP(_Rx *RXUSART1){
 						RXUSART1->state = 2;
 					}
 					RXUSART1->ir++;
-					PutStrOnTx(&TXUSB,ANS_CWMODE);    // Depuracion por USB
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_CWMODE);    // Depuracion por USB
+					}
 				}
 			break;
 
@@ -209,17 +261,20 @@ void ESP(_Rx *RXUSART1){
 				PutStrOnTx(&TXUSART1,CWJAP_MICROS); //Envio comando CWJAP con los datos de la red
 				PutStrOnTx(&TXUSB,CWJAP_MICROS);    // Depuracion por USB
 				RXUSART1->state = 5;
-				On4000ms = 4000;
+				Count3000ms = 30;
 			break;
 
 			case 5: //Leo respuesta
-				if(!Count4000ms){
+				if(On3000ms){
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_CWJAP_MICROS);    // Depuracion por USB
+					}
 					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CWJAP_MICROS[i]){
 						i++;
 						if(i==LONG_ANS_CWJAP_MICROS){
 							i=0;
 							RXUSART1->state = 6;
-							On4000ms = 1;
+							On3000ms = 0;
 						}
 					}
 					else{
@@ -230,7 +285,9 @@ void ESP(_Rx *RXUSART1){
 						RXUSART1->state = 4;
 					}
 					RXUSART1->ir++;
-					PutStrOnTx(&TXUSB,ANS_CWJAP_MICROS);    // Depuracion por USB
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_CWJAP_MICROS);    // Depuracion por USB
+					}
 				}
 			break;
 
@@ -238,17 +295,20 @@ void ESP(_Rx *RXUSART1){
 				PutStrOnTx(&TXUSART1,CIFSR); //Envio comando AT para ver si responde el ESP
 				PutStrOnTx(&TXUSB,CIFSR);    // Depuracion por USB
 				RXUSART1->state = 7;
-				On4000ms = 4000;
+				Count500ms = 5;
 			break;
 
 			case 7:
-				if(!Count4000ms){
+				if(On500ms){
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_CIFSR);    // Depuracion por USB
+					}
 					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CIFSR[i]){
 						i++;
 						if(i==LONG_ANS_CIFSR){
 							i=0;
 							RXUSART1->state = 8;
-							On4000ms = 1;
+							On500ms = 0;
 						}
 					}
 					else{
@@ -259,24 +319,29 @@ void ESP(_Rx *RXUSART1){
 						RXUSART1->state = 6;
 					}
 					RXUSART1->ir++;
-					PutStrOnTx(&TXUSB,ANS_CIFSR);    // Depuracion por USB
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_CIFSR);    // Depuracion por USB
+					}
 				}
 			break;
 			case 8:	//Envio comando
 				PutStrOnTx(&TXUSART1,CIPMUX); //Envio comando AT para ver si responde el ESP
 				PutStrOnTx(&TXUSB,CIPMUX);    // Depuracion por USB
 				RXUSART1->state = 9;
-				Count500ms = 500;
+				Count500ms = 5;
 			break;
 
 			case 9: //Leo respuesta
-				if(!Count500ms){
+				if(On500ms){
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_CIPMUX);    // Depuracion por USB
+					}
 					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CIPMUX[i]){
 						i++;
 						if(i==19){
 							i=0;
 							RXUSART1->state = 10;
-							On500ms = 1;
+							On500ms = 0;
 						}
 					}
 					else{
@@ -287,7 +352,9 @@ void ESP(_Rx *RXUSART1){
 						RXUSART1->state = 8;
 					}
 					RXUSART1->ir++;
-					PutStrOnTx(&TXUSB,ANS_CIPMUX);    // Depuracion por USB
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_CIPMUX);    // Depuracion por USB
+					}
 				}
 			break;
 
@@ -295,17 +362,20 @@ void ESP(_Rx *RXUSART1){
 				PutStrOnTx(&TXUSART1,CIPSTART); //Envio comando AT para ver si responde el ESP
 				PutStrOnTx(&TXUSB,CIPSTART);    // Depuracion por USB
 				RXUSART1->state = 11;
-				On4000ms = 4000;
+				Count3000ms = 30;
 			break;
 
 			case 11: //Leo respuesta
-				if(!Count4000ms){
+				if(On3000ms){
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_CIPSTART);    // Depuracion por USB
+					}
 					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CIPSTART[i]){
 						i++;
 						if(i==59){
 							i=0;
 							RXUSART1->state = 12;
-							On4000ms = 1;
+							On3000ms = 0;
 						}
 					}
 					else{
@@ -316,7 +386,9 @@ void ESP(_Rx *RXUSART1){
 						RXUSART1->state = 10;
 					}
 					RXUSART1->ir++;
-					PutStrOnTx(&TXUSB,ANS_CIPSTART);    // Depuracion por USB
+					if(i==0){
+						PutStrOnTx(&TXUSB,ANS_CIPSTART);    // Depuracion por USB
+					}
 				}
 			break;
 
@@ -334,66 +406,30 @@ void ESP(_Rx *RXUSART1){
 		}
 	}
 }
-uint8_t DecodeANS(_Rx *RX, const char *str,uint8_t strlen){
-	uint8_t aux = RX->ir;
-	for(uint8_t i=0; i<strlen; i++){
-		if(str[i]!=RX->Buff[RX->ir]){
-			RX->ir = aux;
-			return 0;
-		}
-		if(RX->Buff[RX->ir]=='K'){
-			return 1;
-		}
-		RX->ir++;
-	}
-	return 1;
-}
-void PutStrOnTx(_Tx *TX, const char *str)
-{
-    uint8_t i = 0;
-
-    while(str[i]) {
-        TX->Buff[TX->iw++] = str[i++];
-        TX->iw &= TX->maskSize;
-    }
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-	RXUSART1.iw++;
-	HAL_UART_Receive_IT(&huart1, &rxUSART1Buff[RXUSART1.iw], 1);
-}
-
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
-	iAdc++;
-	if(iAdc == 32){
-		iAdc = 0;
-	}
-	if(iAdc >= 2 && iAdc <= 31){
-		for(uint8_t i = 0; i<8; i++){
-			bufADC[iAdc-2][i] = (bufADC[iAdc-2][i] + bufADC[iAdc-1][i] + bufADC[iAdc][i])/3;
-		}
-	}
-}
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 	if(htim->Instance == TIM4){
 		Count100ms--;
-		Count200ms--;
+
 		if(!Count100ms){
 			Count100ms = 100;
 			On100ms = 1;
+
+			if(Count3000ms){
+				Count3000ms--;
+				if(!Count3000ms){
+					On3000ms = 1;
+				}
+			}
+
+			if(Count500ms){
+				Count500ms--;
+				if(!Count500ms){
+					On500ms = 1;
+				}
+			}
 		}
-		if(On200ms){
-			Count200ms = 200;
-			On200ms = 0;
-		}
-		if(Count500ms){
-			Count500ms--;
-		}
-		if(Count4000ms){
-			Count4000ms--;
-		}
+
 		if(RXUSB.header) {                                                       //Si tengo algo distinto de cero, significa que estoy decodificando
 			RXUSB.timeout--;                                                     //entonces decremento
 			if(!RXUSB.timeout)                                                       //si timeout == 0
@@ -405,23 +441,65 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 	}
 }
 
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	RXUSART1.iw++;
+	HAL_UART_Receive_IT(&huart1, &rxUSART1Buff[RXUSART1.iw], 1);
+}
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
+	volatile uint8_t c;
+	if(FirtScan){
+		switch(iAdc){
+			case 1:
+				for(c=0;c<8;c++){
+					bufADC[1][c]=(bufADC[0][c]+bufADC[1][c]) / 2 ;
+				}
+			break;
+			case 2:
+				for(c=0;c<8;c++){
+					bufADC[2][c]=(bufADC[0][c]+bufADC[1][c]+bufADC[2][c]) / 3;
+				}
+				FirtScan = 0;
+			break;
+
+			default:
+			break;
+		}
+	}
+	else{
+		if(iAdc >= 0 && iAdc <= 1){
+			switch(iAdc){
+				case 0:
+					for(c = 0; c<8; c++){
+						bufADC[0][c]=( bufADC[0][c]+bufADC[31][c]+bufADC[30][c]) / 3 ;
+					}
+				break;
+				case 1:
+					for(c = 0; c<8; c++){
+						bufADC[1][c]=(bufADC[0][c]+bufADC[1][c]+bufADC[31][c]) / 3;
+					}
+				break;
+			}
+		}
+		else{
+			for(c = 0; c<8; c++){
+				bufADC[iAdc][c] = (bufADC[iAdc-2][c] + bufADC[iAdc-1][c] + bufADC[iAdc][c])/3;
+			}
+		}
+	}
+	iAdc++;
+	if(iAdc == 32){
+		iAdc = 0;
+	}
+}
+
 void MyCallBackOnUSBData(uint8_t *buf, uint32_t len){
 	for(uint32_t i=0; i<len; i++){
 		rxUSBBuff[RXUSB.iw++] = buf[i];
 	}
 }
 
-
-void PutBuffOnTx(_Tx *TX, uint8_t *buf, uint8_t length)
-{
-    uint8_t i;
-
-    for(i=0; i<length; i++) {
-
-    	TX->Buff[TX->iw++] = buf[i];
-    	TX->iw &= TX->maskSize;
-    }
-}
 
 uint8_t GetByteFromRx(_Rx *RX, int8_t pre, int8_t pos){
     uint8_t aux;
@@ -545,10 +623,36 @@ void DecodeCmd(_Rx *RX)
     }
 }
 
+uint8_t DecodeANS(_Rx *RX, const char *str,uint8_t strlen){
+	uint8_t aux = RX->ir;
+	for(uint8_t i=0; i<strlen; i++){
+		if(str[i]!=RX->Buff[RX->ir]){
+			RX->ir = aux;
+			return 0;
+		}
+		if(RX->Buff[RX->ir]=='K'){
+			return 1;
+		}
+		RX->ir++;
+	}
+	return 1;
+}
+
 void PutByteOnTx(_Tx *TX, uint8_t value)
 {
     TX->Buff[TX->iw++] = value;
     TX->iw &= TX->maskSize;
+}
+
+void PutBuffOnTx(_Tx *TX, uint8_t *buf, uint8_t length)
+{
+    uint8_t i;
+
+    for(i=0; i<length; i++) {
+
+    	TX->Buff[TX->iw++] = buf[i];
+    	TX->iw &= TX->maskSize;
+    }
 }
 
 void PutHeaderOnTx(_Tx *TX, uint8_t id, uint8_t lcmd)
@@ -569,6 +673,7 @@ void PutHeaderOnTx(_Tx *TX, uint8_t id, uint8_t lcmd)
     TX->Buff[TX->iw++] = id;
     TX->iw &= TX->maskSize;
 }
+
 void PutcksOnTx(_Tx *TX)                                                        //Esta funcion se llama despues de haber cargado el payload
 {
     uint8_t cks, i;
@@ -584,6 +689,16 @@ void PutcksOnTx(_Tx *TX)                                                        
 
     TX->Buff[TX->iw++] = cks;
     TX->iw &= TX->maskSize;
+}
+
+void PutStrOnTx(_Tx *TX, const char *str)
+{
+    uint8_t i = 0;
+
+    while(str[i]) {
+        TX->Buff[TX->iw++] = str[i++];
+        TX->iw &= TX->maskSize;
+    }
 }
 
 /* USER CODE END 0 */
@@ -642,9 +757,9 @@ int main(void)
 
 
   Count100ms = 100;
-  Count200ms = 200;
+  Count200ms = 0;
+  Count3000ms = 0;
   Count500ms = 0;
-  Count4000ms = 0;
 /**
 * Comunicacion USB.
 */
@@ -652,13 +767,13 @@ int main(void)
   RXUSB.iw = 0;
   RXUSB.ir = 0;
   RXUSB.header = 0;
-  RXUSB.maskSize = 256-1;
+  RXUSB.maskSize = 255;
   RXUSB.ISCMD = 0;
 
   TXUSB.Buff = txUSBBuff;
   TXUSB.iw = 0;
   TXUSB.ir = 0;
-  TXUSB.maskSize = 256-1;
+  TXUSB.maskSize = 255;
   TXUSB.maskBuf = 255;
 /**
 * Comunicacion ESP8266.
@@ -667,15 +782,23 @@ int main(void)
   RXUSART1.iw = 0;
   RXUSART1.ir = 0;
   RXUSART1.header = 0;
-  RXUSART1.maskSize = 256-1;
+  RXUSART1.maskSize = 255;
   RXUSART1.ISCMD = 0;
 
   TXUSART1.Buff = txUSART1Buff;
   TXUSART1.iw = 0;
   TXUSART1.ir = 0;
-  TXUSART1.maskSize = 256-1;
+  TXUSART1.maskSize = 255;
   TXUSART1.maskBuf = 255;
+
   iAdc = 0;
+  FirtScan=1;
+
+  posMINCenter = 0;
+  posMINRight = 0;
+  posMINLeft = 0;
+  sensorValue = 0;
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -689,6 +812,8 @@ int main(void)
 		  On100ms = 0;
 		  HAL_GPIO_TogglePin(LED13_GPIO_Port, LED13_Pin);
 	  }
+
+//	  Receocion por USB
 	  if(RXUSB.iw != RXUSB.ir) {                                                  //Si tengo datos en el buffer --> Entonces decodifico lo que tengo
 		  DecodeHeader((_Rx *)&RXUSB);
 	  }
@@ -696,7 +821,7 @@ int main(void)
 	  if(RXUSB.ISCMD) {
 		  DecodeCmd((_Rx *)&RXUSB);
 	  }
-//Transmision a USB
+//Transmision por USB
 	  if(TXUSB.iw != TXUSB.ir) {
 		  if(TXUSB.iw > TXUSB.ir){
 			  if(USBD_OK==CDC_Transmit_FS(&TXUSB.Buff[TXUSB.ir], (TXUSB.iw-TXUSB.ir)))
@@ -709,7 +834,7 @@ int main(void)
 		  }
 		  TXUSB.ir &= TXUSB.maskSize;
 	  }
-//Transmision a ESP8266
+//Transmision por ESP8266
 	  if(TXUSART1.iw != TXUSART1.ir) {
 		  if(huart1.Instance->SR){
 			  huart1.Instance->DR = txUSART1Buff[TXUSART1.ir++];
