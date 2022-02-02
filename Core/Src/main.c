@@ -39,14 +39,18 @@
 /* USER CODE BEGIN PD */
 
 #define ADCTIMEOUT      flag1.bit.b0
+/************************* Valores MAX-MIN de motores *****************************/
 #define PWMBMAX			4800
 #define PWMAMAX			9000
 #define PWMBMIN			2800
 #define PWMAMIN			4500
+/**********************************************************************************/
 
+/************************* Longitud de respuestas ESP *****************************/
 #define LONG_CWJAP_MICROS	35
 #define LONG_ANS_CWJAP_MICROS 70
 #define LONG_ANS_CIFSR 141
+/**********************************************************************************/
 
 /* USER CODE END PD */
 
@@ -67,6 +71,8 @@ TIM_HandleTypeDef htim4;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+
+/******************************** Comandos AT ***********************************/
 const char AT[]="AT\r\n";
 const char CWJAP_MICROS[]="AT+CWJAP=\"MICROS\",\"micros1234567\"\r\n";
 const char CIFSR[] = "AT+CIFSR\r\n";
@@ -76,6 +82,9 @@ const char CIPSEND[] = "AT+CIPSEND=";
 const char CIPCLOSE[] = "AT+CIPCLOSE\r\n";
 const char CWQAP[] = "AT+CWQAP\r\n";
 const char CWMODE[] = "AT+CWMODE=3\r\n";
+/********************************************************************************/
+
+/*************************** Respuestas comandos AT *****************************/
 const char ANS_CWMODE[] = "AT+CWMODE=3\r\n\r\nOK\r\n"; //19
 const char ANS_CWQAP[] = "AT+CWQAP\r\n\r\nOK\r\n"; //16
 const char ANS_CWJAP_MICROS[]="AT+CWJAP=\"MICROS\",\"micros1234567\"\r\nWIFI CONNECTED\r\nWIFI GOT IP\r\n\r\nOK\r\n";//70
@@ -92,31 +101,37 @@ const char CIPSEND1[]={'A','T','+','C','I','P','S','E','N','D','='};
 const char CIPSEND2[]={'\r','\n','\r','\n','O','K','\r','\n','>',};
 const char CIPSEND3[]="Recv";
 const char CIPSEND4[]={ "bytes\r\n\r\nSEND OK\r\n"};
+/*********************************************************************************/
 
+/********************* Cálculo error algoritmo cuadratico ************************/
 const int COORD_SENSORES[]={-4,-3,-2,-1,1,2,3,4};
 static uint8_t FirtScan;
+volatile uint16_t bufADC[32][8];
+volatile uint8_t iAdc;
+uint8_t posMINCenter, posMINRight, posMINLeft;
+uint16_t sensorValue;
+float error,fx2_fx3,fx2_fx1,x2_x1,x2_x3,x2_x1cuad,x2_x3cuad,denominador;
+/*********************************************************************************/
+/************************************* PID ***************************************/
+volatile float Kp, Ki, Kd, Proporcional, Integral, Derivativo, PWM, lastError;
+volatile uint8_t TimeOutPID;
+/*********************************************************************************/
 
+/***************************** Contadores timmer *********************************/
 volatile uint16_t timeOutms, On100ms, On200ms, On3000ms, On500ms, Count100ms, Count200ms, Count3000ms, Count500ms;
+/*********************************************************************************/
 
+/********************** Comunicación - Buffer e indices  *************************/
 volatile _Rx RXUSB, RXUSART1;
 _Tx TXUSB, TXUSART1;
+uint8_t rxUSBBuff[256], rxUSART1Buff[256];
+uint8_t txUSBBuff[256], txUSART1Buff[256];
+/*********************************************************************************/
 _work w;
 
 volatile _sFlag flag1;
 
-uint8_t rxUSBBuff[256], rxUSART1Buff[256];
-uint8_t txUSBBuff[256], txUSART1Buff[256];
 
-volatile uint16_t bufADC[32][8];
-volatile uint8_t iAdc;
-
-uint8_t posMINCenter, posMINRight, posMINLeft;
-uint16_t sensorValue;
-float error,fx2_fx3,fx2_fx1,x2_x1,x2_x3,x2_x1cuad,x2_x3cuad,denominador;
-
-//volatile uint16_t PWMA, PWMB;
-volatile float Kp, Ki, Kd, Proporcional, Integral, Derivativo, PWM, lastError;
-volatile uint8_t TimeOutPID;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -128,29 +143,102 @@ static void MX_USART1_UART_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM3_Init(void);
+
 /* USER CODE BEGIN PFP */
 
+/**********************************************************************************/
+/*************************** Prototipos de Funciones ******************************/
+/**********************************************************************************/
+
+/*
+ * Captura datos entrantes por USB
+ * Incrementa indice de buffer de recepción
+ *
+ */
 void MyCallBackOnUSBData(uint8_t *buf, uint32_t len);
-
+/*
+ * Decodifica protocolo de comunicacion
+ * Calcula checksum
+ * Detecta si hay comando
+ *
+ */
 void DecodeHeader(_Rx *RX);
+/*
+ * Decodifica comando
+ * Envida datos segun comando
+ *
+ */
 void DecodeCmd(_Rx *RX);
+/*
+ * Carga buffer Tx en el buffer de USB o USART
+ *
+ */
 void PutBuffOnTx(_Tx *TX, uint8_t *buf, uint8_t length);
+/*
+ * Carga byte Tx en el buffer de USB o USART
+ *
+ */
 void PutByteOnTx(_Tx *TX, uint8_t value);
+/*
+ * Carga de protocolo en la cabecera en buffer de USB o ESP
+ *
+ */
 void PutHeaderOnTx(_Tx *TX, uint8_t id, uint8_t lcmd);
+/*
+ * Carga de checksum en buffer de USB o ESP
+ *
+ */
 void PutcksOnTx(_Tx *TX);
+/*
+ * Carga de string en buffer de USB o ESP
+ *
+ */
 void PutStrOnTx(_Tx *TX, const char *str);
-
+/*
+ * Captura de byte de buffer Rx de USB o ESP
+ *
+ */
 uint8_t GetByteFromRx(_Rx *RX, int8_t pre, int8_t pos);
-
+/*
+ * Inicializacin de ESP
+ * Se envia comando AT
+ * Pasado tiempo correspondiente se decodifica respuesta
+ *
+ */
 void ESP(_Rx *RXUSART1);
+/*
+ * Decodifica respuesta entrante hasta encontrar caracter "K" de "OK"
+ *
+ */
 uint8_t DecodeANS(_Rx *RX, const char *str, uint8_t strlen);
+/*
+ * Calculo de error cuadratico
+ *
+ */
+void ErrorCuadratico();
+/*
+ * Cálculo de PID
+ * Control de velocidad de motores
+ *
+ */
+void PID(uint32_t PWMA,uint32_t PWMB);
+
+/**********************************************************************************/
+/**********************************************************************************/
+/**********************************************************************************/
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/**********************************************************************************/
+/********************************** Funciones *************************************/
+/**********************************************************************************/
+
 void PID(uint32_t PWMA,uint32_t PWMB){
 
+/**************************** Cálculo de variables PID ****************************/
 	Proporcional = Kp*error;
 	Integral += Ki*TimeOutPID*error;
 	Derivativo = Kd*(error-lastError)/TimeOutPID;
@@ -159,27 +247,40 @@ void PID(uint32_t PWMA,uint32_t PWMB){
 
 	PWMA = PWMA - PWM;
 	PWMB = PWMB + PWM;
+/**********************************************************************************/
 
-//	if(pwm1>200)
-//		pwm1=200;
-//	if(pwm2>200)
-//		pwm2=200;
+/************************ Seteo de variables fuera de rango ************************/
+	if(PWMA>PWMAMAX)
+		PWMA=PWMAMAX;
+	if(PWMB>PWMBMAX)
+		PWMB=PWMBMAX;
+	if(PWMA<PWMAMIN)
+		PWMA=PWMAMIN;
+	if(PWMB>PWMBMIN)
+		PWMB=PWMBMIN;
+/***********************************************************************************/
 
+/*************************** Actuacion de motores con PID **************************/
 	__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_1,PWMA);
 	__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_2,0);
 	__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_3,0);
 	__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_4,PWMB);
+/***********************************************************************************/
+
 	lastError=error;
 }
 
-float CuadraticAppprox(){						//ALGORITMO CUADRATICO
+void ErrorCuadratico(){
+/******************************* Variables locales *********************************/
 	uint16_t aux[10];
 
 	sensorValue = bufADC[iAdc][0];
 
 	posMINCenter=0;
+/***********************************************************************************/
 
-	for(uint8_t c=0; c<8; c++){				//ENCUENTRO LA MAYOR LECTURA
+/*************************** Encuentro la menor lectura ****************************/
+	for(uint8_t c=0; c<8; c++){
 		if(sensorValue < bufADC[iAdc][c]){
 			sensorValue = bufADC[iAdc][c];
 			posMINCenter = c;
@@ -190,7 +291,9 @@ float CuadraticAppprox(){						//ALGORITMO CUADRATICO
 	posMINCenter+=1;
 	aux[0]=aux[2];
 	aux[9]=aux[7];
+/***********************************************************************************/
 
+/***************** Calculo de error segun peso asignado a sensores *****************/
 	posMINRight=posMINCenter-1;
 	posMINLeft=posMINCenter+1;
 	fx2_fx3=aux[posMINCenter]-aux[posMINRight];
@@ -203,7 +306,7 @@ float CuadraticAppprox(){						//ALGORITMO CUADRATICO
 	if(denominador!= 0){
 		error=COORD_SENSORES[posMINCenter]-( x2_x1cuad*fx2_fx3 - x2_x3cuad*fx2_fx1 ) / denominador;
 	}
-	return -error;
+/***********************************************************************************/
 }
 
 void ESP(_Rx *RXUSART1){
@@ -430,6 +533,11 @@ void ESP(_Rx *RXUSART1){
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
+/***************** Contadores para control del flujo de tiempo ********************/
+/*
+ * Instancia cada 1ms
+ *
+ */
 	if(htim->Instance == TIM4){
 		Count100ms--;
 
@@ -437,30 +545,35 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 			Count100ms = 100;
 			On100ms = 1;
 
-			if(Count3000ms){
-				Count3000ms--;
-				if(!Count3000ms){
-					On3000ms = 1;
-				}
+			Count3000ms--;
+			if(!Count3000ms){
+				On3000ms = 1;
 			}
 
-			if(Count500ms){
-				Count500ms--;
-				if(!Count500ms){
-					On500ms = 1;
-				}
+			Count500ms--;
+			if(!Count500ms){
+				On500ms = 1;
 			}
 		}
 
-		if(RXUSB.header) {                                                       //Si tengo algo distinto de cero, significa que estoy decodificando
-			RXUSB.timeout--;                                                     //entonces decremento
-			if(!RXUSB.timeout)                                                       //si timeout == 0
-				RXUSB.header = 0;                                                    //reinicio la decodificacion porque se demoro mucho
+		if(RXUSB.header) {
+			RXUSB.timeout--;
+			if(!RXUSB.timeout)
+				RXUSB.header = 0;
 		}
 	}
+/**********************************************************************************/
+
+/************************* Incio lectura analogica por DMA *************************/
+/*
+ * Instancia cada 500us
+ *
+ */
 	if(htim->Instance == TIM3){
 		HAL_ADC_Start_DMA(&hadc1, (uint32_t *) &bufADC[iAdc], 8);
 	}
+/***********************************************************************************/
+
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -471,6 +584,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 	volatile uint8_t c;
+/********************* Media movil de las 3 primeras lecturas **********************/
 	if(FirtScan){
 		switch(iAdc){
 			case 1:
@@ -489,8 +603,12 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 			break;
 		}
 	}
+
+/***********************************************************************************/
+/********************* Media movil de las siguientes lecturas **********************/
 	else{
 		if(iAdc >= 0 && iAdc <= 1){
+			// Cruce por 0 y 1 donde se toman dos valores anteriores para hacer la media
 			switch(iAdc){
 				case 0:
 					for(c = 0; c<8; c++){
@@ -505,11 +623,14 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 			}
 		}
 		else{
+			// Cálculo comprendido entre bufADC[2] y bufADC[31]
 			for(c = 0; c<8; c++){
 				bufADC[iAdc][c] = (bufADC[iAdc-2][c] + bufADC[iAdc-1][c] + bufADC[iAdc][c])/3;
 			}
 		}
 	}
+/***********************************************************************************/
+	// Incrento indice del buffer
 	iAdc++;
 	if(iAdc == 32){
 		iAdc = 0;
@@ -687,8 +808,9 @@ void PutHeaderOnTx(_Tx *TX, uint8_t id, uint8_t lcmd)
     TX->iw &= TX->maskSize;
     TX->Buff[TX->iw++] = 'R';
     TX->iw &= TX->maskSize;
+    //lcmd cantidad de datos: id+payload+cks
     TX->length = lcmd;
-    TX->Buff[TX->iw++] = lcmd + 1;                                             //lcmd cantidad de datos: id+payload+cks
+    TX->Buff[TX->iw++] = lcmd + 1;
     TX->iw &= TX->maskSize;
     TX->Buff[TX->iw++] = ':';
     TX->iw &= TX->maskSize;
@@ -696,7 +818,7 @@ void PutHeaderOnTx(_Tx *TX, uint8_t id, uint8_t lcmd)
     TX->iw &= TX->maskSize;
 }
 
-void PutcksOnTx(_Tx *TX)                                                        //Esta funcion se llama despues de haber cargado el payload
+void PutcksOnTx(_Tx *TX)
 {
     uint8_t cks, i;
 
@@ -777,14 +899,20 @@ int main(void)
   //Interrupcion para recibir datos desde ESP8266
   HAL_UART_Receive_IT(&huart1,rxUSART1Buff,1);
 
-
+/***********************************************************************************/
+/************************** Inicializacion de contadores ***************************/
+/***********************************************************************************/
   Count100ms = 100;
   Count200ms = 0;
   Count3000ms = 0;
   Count500ms = 0;
-/**
-* Comunicacion USB.
-*/
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/*************************** Inicializacion de variables USB ***********************/
+/***********************************************************************************/
   RXUSB.Buff = (uint8_t *)rxUSBBuff;
   RXUSB.iw = 0;
   RXUSB.ir = 0;
@@ -797,9 +925,13 @@ int main(void)
   TXUSB.ir = 0;
   TXUSB.maskSize = 255;
   TXUSB.maskBuf = 255;
-/**
-* Comunicacion ESP8266.
-*/
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/********************** Inicialización de  ESP8266 ************************/
+/***********************************************************************************/
   RXUSART1.Buff = (uint8_t *)rxUSART1Buff;
   RXUSART1.iw = 0;
   RXUSART1.ir = 0;
@@ -812,22 +944,44 @@ int main(void)
   TXUSART1.ir = 0;
   TXUSART1.maskSize = 255;
   TXUSART1.maskBuf = 255;
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
 
+/***********************************************************************************/
+/************************ Inicializacion de  ADC **************************/
+/***********************************************************************************/
   iAdc = 0;
   FirtScan=1;
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
 
+
+/***********************************************************************************/
+/***************** Inicializacion de  error cuadratico ********************/
+/***********************************************************************************/
   posMINCenter = 0;
   posMINRight = 0;
   posMINLeft = 0;
   sensorValue = 0;
-
   error = 0;
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+
+/***********************************************************************************/
+/************************* Inicialización de variables PID *************************/
+/***********************************************************************************/
   Kp = 0;
   Ki = 0;
   Kd = 0;
   Proporcional = 0;
   Integral = 0;
   Derivativo = 0;
+/***********************************************************************************/
+/***********************************************************************************/
+/***********************************************************************************/
 
   /* USER CODE END 2 */
 
@@ -843,15 +997,15 @@ int main(void)
 		  HAL_GPIO_TogglePin(LED13_GPIO_Port, LED13_Pin);
 	  }
 
-//	  Receocion por USB
-	  if(RXUSB.iw != RXUSB.ir) {                                                  //Si tengo datos en el buffer --> Entonces decodifico lo que tengo
+	  //Recepcion por USB
+	  if(RXUSB.iw != RXUSB.ir) {
 		  DecodeHeader((_Rx *)&RXUSB);
 	  }
 
 	  if(RXUSB.ISCMD) {
 		  DecodeCmd((_Rx *)&RXUSB);
 	  }
-//Transmision por USB
+	  //Transmision por USB
 	  if(TXUSB.iw != TXUSB.ir) {
 		  if(TXUSB.iw > TXUSB.ir){
 			  if(USBD_OK==CDC_Transmit_FS(&TXUSB.Buff[TXUSB.ir], (TXUSB.iw-TXUSB.ir)))
@@ -864,7 +1018,16 @@ int main(void)
 		  }
 		  TXUSB.ir &= TXUSB.maskSize;
 	  }
-//Transmision por ESP8266
+	  //Recepcion por ESP8266
+	  	  if(RXUSART1.iw != RXUSART1.ir) {
+	  		  DecodeHeader((_Rx *)&RXUSART1);
+	  	  }
+
+	  	  if(RXUSART1.ISCMD) {
+	  		  DecodeCmd((_Rx *)&RXUSART1);
+	  	  }
+
+	  //Transmision por ESP8266
 	  if(TXUSART1.iw != TXUSART1.ir) {
 		  if(huart1.Instance->SR){
 			  huart1.Instance->DR = txUSART1Buff[TXUSART1.ir++];
