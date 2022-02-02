@@ -96,7 +96,7 @@ const char CIPSEND4[]={ "bytes\r\n\r\nSEND OK\r\n"};
 const int COORD_SENSORES[]={-4,-3,-2,-1,1,2,3,4};
 static uint8_t FirtScan;
 
-volatile uint32_t timeOutms, On100ms, On200ms, On3000ms, On500ms, Count100ms, Count200ms, Count3000ms, Count500ms;
+volatile uint16_t timeOutms, On100ms, On200ms, On3000ms, On500ms, Count100ms, Count200ms, Count3000ms, Count500ms;
 
 volatile _Rx RXUSB, RXUSART1;
 _Tx TXUSB, TXUSART1;
@@ -112,11 +112,11 @@ volatile uint8_t iAdc;
 
 uint8_t posMINCenter, posMINRight, posMINLeft;
 uint16_t sensorValue;
-float xMin=0,fx2_fx3,fx2_fx1,x2_x1,x2_x3,x2_x1cuad,x2_x3cuad,denominador;
+float error,fx2_fx3,fx2_fx1,x2_x1,x2_x3,x2_x1cuad,x2_x3cuad,denominador;
 
-volatile uint16_t PWMA, PWMB;
-volatile uint8_t Kp, Ki, Kd;
-
+//volatile uint16_t PWMA, PWMB;
+volatile float Kp, Ki, Kd, Proporcional, Integral, Derivativo, PWM, lastError;
+volatile uint8_t TimeOutPID;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -149,6 +149,28 @@ uint8_t DecodeANS(_Rx *RX, const char *str, uint8_t strlen);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+void PID(uint32_t PWMA,uint32_t PWMB){
+
+	Proporcional = Kp*error;
+	Integral += Ki*TimeOutPID*error;
+	Derivativo = Kd*(error-lastError)/TimeOutPID;
+
+	PWM= Proporcional + Integral + Derivativo;
+
+	PWMA = PWMA - PWM;
+	PWMB = PWMB + PWM;
+
+//	if(pwm1>200)
+//		pwm1=200;
+//	if(pwm2>200)
+//		pwm2=200;
+
+	__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_1,PWMA);
+	__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_2,0);
+	__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_3,0);
+	__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_4,PWMB);
+	lastError=error;
+}
 
 float CuadraticAppprox(){						//ALGORITMO CUADRATICO
 	uint16_t aux[10];
@@ -179,9 +201,9 @@ float CuadraticAppprox(){						//ALGORITMO CUADRATICO
 	x2_x3cuad=(x2_x3*x2_x3);
 	denominador=(2*(x2_x1*fx2_fx3-x2_x3*fx2_fx1));
 	if(denominador!= 0){
-		xMin=COORD_SENSORES[posMINCenter]-( x2_x1cuad*fx2_fx3 - x2_x3cuad*fx2_fx1 ) / denominador;
+		error=COORD_SENSORES[posMINCenter]-( x2_x1cuad*fx2_fx3 - x2_x3cuad*fx2_fx1 ) / denominador;
 	}
-	return -xMin;
+	return -error;
 }
 
 void ESP(_Rx *RXUSART1){
@@ -798,6 +820,14 @@ int main(void)
   posMINRight = 0;
   posMINLeft = 0;
   sensorValue = 0;
+
+  error = 0;
+  Kp = 0;
+  Ki = 0;
+  Kd = 0;
+  Proporcional = 0;
+  Integral = 0;
+  Derivativo = 0;
 
   /* USER CODE END 2 */
 
