@@ -17,10 +17,12 @@ typedef struct{
     uint8_t state;
     uint8_t cks;
     uint8_t ckst;
-    uint8_t nbytes;
-    uint8_t iData;
+    uint8_t nbytes;					//Nbytes[cantidad de bytes de mi buffer]
+    uint8_t IntPutBytes;
+    uint8_t iData;					//iData[indice para saber donde comienzan mis datos;
     uint8_t maskSize;
-    uint8_t timeout;                //Nbytes[cantidad de bytes de mi buffer]; iData[indice para saber donde comienzan mis datos; rx.ckst[]
+    uint8_t timeout;
+    uint8_t i;
 }_Rx;
 
 typedef struct{
@@ -28,8 +30,10 @@ typedef struct{
     uint8_t iw;
     uint8_t ir;
     uint8_t length;
+    uint8_t OutPutBytes;
     uint8_t maskSize;                //Nbytes[cantidad de bytes de mi buffer]; iData[indice para saber donde comienzan mis datos; _rx.ckst[]
     uint8_t maskBuf;
+    uint8_t DataSent;
 }_Tx;
 
 typedef union{
@@ -39,7 +43,6 @@ typedef union{
 	int16_t     i16[2];
 	uint32_t    u32;
 	int32_t     i32;
-	float       f;
 }_work;
 
 typedef union{
