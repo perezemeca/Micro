@@ -62,6 +62,8 @@
 #define DecodeIPD				flag1.bit.b6
 #define ECOCIPSEND				flag1.bit.b7
 
+#define ResetESP				flag2.bit.b0
+
 /**********************************************************************************/
 /* USER CODE END PD */
 
@@ -106,8 +108,8 @@ const char ANS_CIFSR[] = "AT+CIFSR\r\n";
 const char ANS_CIFSR_STAIP[] = "+CIFSR:STAIP,\"";
 const char ANS_CIPSTART[]="AT+CIPSTART=\"UDP\",\"192.168.1.5\",30011,3011\r\nCONNECT\r\n\r\nOK\r\n";//59
 const char ANS_AT[] = "AT\r\n\r\nOK\r\n";
-const char AUTOMATIC_WIFI_CONNECTED[] = {"WIFI CONNECTED\r\nWIFI GOT IP\r\n"};
-const char WIFI_DISCONNECT[] = "WIFI DISCONNECT\r\n";
+const char AUTOMATIC_WIFI_CONNECTED[] = {"rIFI CONNECTED\r\nWIFI GOT IP\r\n"};
+const char WIFI_DISCONNECT[] = "rIFI DISCONNECT\r\n";
 const char CIFSR_STAIP[] = "+CIFSR:STAIP,\"";
 const char OK[]="\r\nOK\r\n";
 const char CIPSEND1[]={"AT+CIPSEND="};
@@ -133,7 +135,7 @@ uint8_t Kp, Ki, Kd;
 /*********************************************************************************/
 
 /***************************** Contadores timmer *********************************/
-volatile uint16_t On10ms, On100ms, On200ms, On3000ms, On500ms, Count100ms, Count200ms, Count3000ms, Count500ms;
+volatile uint16_t TimeOut, On10ms, On100ms, On200ms, On3000ms, On500ms, Count100ms, Count200ms, Count3000ms, Count500ms;
 /*********************************************************************************/
 
 /********************** Comunicación - Buffer e indices  *************************/
@@ -147,7 +149,7 @@ char EspIp[15];
 /*********************************************************************************/
 _work w;
 
-volatile _sFlag flag1;
+volatile _sFlag flag1, flag2;
 
 
 /* USER CODE END PV */
@@ -337,40 +339,38 @@ void ErrorCuadratico(){
 void InitEsp(_Rx *RXUSART1){
 	switch(RXUSART1->state){
 		case 0:
-			PutStrOnTx(&TXUSART1,AT); //Envio comando AT para ver si responde el ESP
-			PutStrOnTx(&TXUSB,AT);    // Depuracion por USB
+//			PutStrOnTx(&TXUSART1,AT); //Envio comando AT para ver si responde el ESP
+//			//PutStrOnTx(&TXUSB,AT);    // Depuracion por USB
 			Count500ms = 5;
 		break;
 
 		case 1:
 			PutStrOnTx(&TXUSART1,CWMODE); //Envio comando CWMODE
-			PutStrOnTx(&TXUSB,CWMODE);    // Depuracion por USB
+			//PutStrOnTx(&TXUSB,CWMODE);    // Depuracion por USB
 			Count500ms = 5;
 		break;
 
 		case 2:
 			PutStrOnTx(&TXUSART1,CWJAP_); //Envio comando CWJAP con los datos de la red
-			PutStrOnTx(&TXUSB,CWJAP_);    // Depuracion por USB
+			//PutStrOnTx(&TXUSB,CWJAP_);    // Depuracion por USB
 			Count3000ms = 30;
 		break;
 
 		case 3:
 			PutStrOnTx(&TXUSART1,CIFSR);
-			PutStrOnTx(&TXUSB,CIFSR);    // Depuracion por USB
+			//PutStrOnTx(&TXUSB,CIFSR);    // Depuracion por USB
 			Count500ms = 5;
 		break;
 
 		case 4:
 			PutStrOnTx(&TXUSART1,CIPMUX);
-			PutStrOnTx(&TXUSB,CIPMUX);    // Depuracion por USB
-			RXUSART1->state = 9;
+			//PutStrOnTx(&TXUSB,CIPMUX);    // Depuracion por USB
 			Count500ms = 5;
 		break;
 
 		case 5:
 			PutStrOnTx(&TXUSART1,CIPSTART);
-			PutStrOnTx(&TXUSB,CIPSTART);    // Depuracion por USB
-			RXUSART1->state = 11;
+			//PutStrOnTx(&TXUSB,CIPSTART);    // Depuracion por USB
 			Count3000ms = 30;
 		break;
 	}
@@ -389,16 +389,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 		if(!Count100ms){
 			Count100ms = 100;
 			On100ms = 1;
-
-			if(Count3000ms > 0) Count3000ms--;
-			if(!Count3000ms){
-				On3000ms = 1;
-			}
-
-			if(Count500ms > 0)Count500ms--;
-			if(!Count500ms){
-				On500ms = 1;
-			}
 		}
 		if(Count100ms % 10 == 0){
 			On10ms = 1;
@@ -429,22 +419,64 @@ void DecodeESP(_Rx *RXUSART1){
 		switch(RXUSART1->state){
 			case 0:
 				if(On500ms){
-					if(RXUSART1->Buff[RXUSART1->ir]==ANS_AT[RXUSART1->i]){
-						RXUSART1->i ++;
-						if(RXUSART1->i ==10){
-							RXUSART1->i =0;
+					if(RXUSART1->Buff[RXUSART1->ir]==AUTOMATIC_WIFI_CONNECTED[RXUSART1->i]){
+						RXUSART1->i++;
+						if(RXUSART1->i==29){
+							RXUSART1->i=0;
 							RXUSART1->state = 1;
 							On500ms = 0;
-							ESPReadyToRecyb = 0;
 						}
 					}
 					else{
-						if(RXUSART1->i > 0){
-							RXUSART1->ir = RXUSART1->iw;
-							RXUSART1->i =0;
+						if(RXUSART1->Buff[RXUSART1->ir]==WIFI_DISCONNECT[RXUSART1->i]){
+							RXUSART1->i++;
+							if(RXUSART1->i==17){
+								RXUSART1->i=0;
+								RXUSART1->state = 0;
+								On500ms = 0;
+								espConnected = 0;
+								ESPReadyToRecyb = 0;
+								ResetESP = 1;
+								HAL_UART_AbortReceive_IT(&huart1);
+								HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_RESET);//Reset ESP8266
+								TimeOut = 40;
+							}
 						}
-						RXUSART1->state = 10;	//Restart ESP8266
+						else{
+							RXUSART1->ir = RXUSART1->iw;
+							RXUSART1->i=0;
+							RXUSART1->state = 0;
+							ResetESP = 1;
+							HAL_UART_AbortReceive_IT(&huart1);
+							HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_RESET);//Reset ESP8266
+							TimeOut = 40;
+						}
+
 					}
+//					if(RXUSART1->Buff[RXUSART1->ir]==ANS_AT[RXUSART1->i]){
+//						RXUSART1->i ++;
+//						if(RXUSART1->i ==10){
+//							RXUSART1->i =0;
+//							RXUSART1->state = 1;
+//							On500ms = 0;
+//							ESPReadyToRecyb = 0;
+//						}
+//					}
+//					if((RXUSART1->Buff[RXUSART1->ir]=='r' || RXUSART1->Buff[RXUSART1->ir]=='S') && RXUSART1->Buff[RXUSART1->ir++]=='A'){
+//						RXUSART1->state = 1;
+//						RXUSART1->i =0;
+//						RXUSART1->state = 1;
+//						On500ms = 0;
+//						ESPReadyToRecyb = 0;
+//					}
+//					else{
+//						if(RXUSART1->i > 0){
+//							RXUSART1->ir = RXUSART1->iw;
+//							RXUSART1->i =0;
+//						}
+//						RXUSART1->state = 10;	//Restart ESP8266
+//					}
+					RXUSART1->ir++;
 				}
 			break;
 
@@ -464,8 +496,9 @@ void DecodeESP(_Rx *RXUSART1){
 							RXUSART1->ir = RXUSART1->iw;
 							RXUSART1->i=0;
 						}
-						RXUSART1->state = 10;
+						RXUSART1->state = 0;
 					}
+					RXUSART1->ir++;
 				}
 			break;
 
@@ -485,8 +518,9 @@ void DecodeESP(_Rx *RXUSART1){
 							RXUSART1->ir = RXUSART1->iw;
 							RXUSART1->i=0;
 						}
-						RXUSART1->state = 10;
+						RXUSART1->state = 0;
 					}
+					RXUSART1->ir++;
 				}
 			break;
 
@@ -543,6 +577,7 @@ void DecodeESP(_Rx *RXUSART1){
 								}
 							}
 						break;
+						RXUSART1->ir++;
 					}
 				}
 			break;
@@ -563,9 +598,10 @@ void DecodeESP(_Rx *RXUSART1){
 							RXUSART1->ir = RXUSART1->iw;
 							RXUSART1->i=0;
 						}
-						RXUSART1->state = 10;
+						RXUSART1->state = 0;
 						ESPReadyToRecyb = 0;
 					}
+					RXUSART1->ir++;
 				}
 			break;
 			case 5:
@@ -583,39 +619,9 @@ void DecodeESP(_Rx *RXUSART1){
 							RXUSART1->ir = RXUSART1->iw;
 							RXUSART1->i=0;
 						}
-						RXUSART1->state = 10;
-					}
-				}
-			break;
-
-			case 10:
-				if(RXUSART1->Buff[RXUSART1->ir]==AUTOMATIC_WIFI_CONNECTED[RXUSART1->i]){
-					RXUSART1->i++;
-					if(RXUSART1->i==29){
-						RXUSART1->i=0;
-						RXUSART1->state = 4;
-						On500ms = 0;
-					}
-				}
-				else{
-					if(RXUSART1->Buff[RXUSART1->ir]==WIFI_DISCONNECT[RXUSART1->i]){
-						RXUSART1->i++;
-						if(RXUSART1->i==17){
-							RXUSART1->i=0;
-							RXUSART1->state = 0;
-							On500ms = 0;
-							espConnected = 0;
-							ESPReadyToRecyb = 0;
-							HAL_UART_AbortReceive_IT(&huart1);
-							HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_RESET);//Reset ESP8266
-						}
-					}
-					else{
-						RXUSART1->ir = RXUSART1->iw;
-						RXUSART1->i=0;
 						RXUSART1->state = 0;
 					}
-
+					RXUSART1->ir++;
 				}
 			break;
 		}
@@ -708,6 +714,7 @@ void DecodeESP(_Rx *RXUSART1){
 				}
 			break;
 		}
+		RXUSART1->ir++;
 	}
 	if(DecodeIPD){
 		if(RXUSART1->Buff[RXUSART1->ir]==IPD[RXUSART1->i]){
@@ -726,17 +733,19 @@ void DecodeESP(_Rx *RXUSART1){
 			RXUSART1->i = 0;
 			RXUSART1->ir = RXUSART1->iw;
 		}
+		RXUSART1->ir++;
 	}
 
-	ESPReadyToRecyb = 0;
+	//ESPReadyToRecyb = 0;
 
-	RXUSART1->ir++;
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	RXUSART1.iw++;
-	HAL_UART_Receive_IT(&huart1, &rxUSART1Buff[RXUSART1.iw], 1);
+	if(huart->Instance==USART1){
+		RXUSART1.iw++;
+		HAL_UART_Receive_IT(&huart1, &rxUSART1Buff[RXUSART1.iw], 1);
+	}
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
@@ -1056,7 +1065,8 @@ int main(void)
 
   HAL_TIM_Base_Start_IT(&htim4);
   HAL_TIM_Base_Start_IT(&htim3);
-  HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_SET);//Enable ESP8266
+  //Enable ESP8266
+  HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_SET);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
@@ -1065,11 +1075,6 @@ int main(void)
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 0);
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, 0);
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0);
-  //Delay de 4000ms para esperar a que inicie la ESP8266
-  HAL_Delay(4000);
-  //Interrupcion para recibir datos desde ESP8266
-  HAL_UART_Receive_IT(&huart1,rxUSART1Buff,1);
-
 /***********************************************************************************/
 /************************** Inicializacion de contadores ***************************/
 /***********************************************************************************/
@@ -1077,6 +1082,7 @@ int main(void)
   Count200ms = 0;
   Count3000ms = 0;
   Count500ms = 0;
+  TimeOut = 40;
 /***********************************************************************************/
 /***********************************************************************************/
 /***********************************************************************************/
@@ -1124,6 +1130,7 @@ int main(void)
   DecodeHeaderESP = 0;
   ESPReadyToRecyb = 0;
   ECOCIPSEND = 0;
+  ResetESP = 1;
 
 /***********************************************************************************/
 /***********************************************************************************/
@@ -1177,15 +1184,24 @@ int main(void)
 	  if(On100ms){
 		  On100ms = 0;
 		  HAL_GPIO_TogglePin(LED13_GPIO_Port, LED13_Pin);
-		  SendUDPData(0xF0);
+
+		  if(Count3000ms > 0) Count3000ms--;
+		  if(!Count3000ms){
+			  On3000ms = 1;
+		  }
+		  if(Count500ms > 0){
+			  Count500ms--;
+		  }
+		  if(!Count500ms){
+			  On500ms = 1;
+		  }
+		  //Utilizado como delay para no capturar basura de la ESP8266 al iniciarla
+		  if(TimeOut > 0){
+			  TimeOut--;
+		  }
+		  //SendUDPData(0xF0);
 	  }
-	  if((!espConnected) && (!ESPReadyToRecyb)){
-		  InitEsp((_Rx *)&RXUSART1);
-	  }
-	  if(ESPGotIP){
-		  ESPGotIP = 0;
-		  SendUDPData(0xB0);
-	  }
+
 	  //Recepcion por USB - Decodifica header
 	  if(RXUSB.iw != RXUSB.ir) {
 		  DecodeHeader((_Rx *)&RXUSB);
@@ -1207,9 +1223,25 @@ int main(void)
 		  }
 		  TXUSB.ir &= TXUSB.maskSize;
 	  }
+	  //Primera inicializacion de ESP8266 y Restart
+	  if((!TimeOut) && (ResetESP)){
+		  InitEsp((_Rx *)&RXUSART1);
+		  //Interrupcion para recibir datos desde ESP8266
+		  HAL_UART_Receive_IT(&huart1,rxUSART1Buff,1);
+		  ResetESP = 0;
+	  }
+	  //Continua con los casos para iniciar
+	  if((!espConnected) && (!ESPReadyToRecyb) && (!ResetESP)){
+		  InitEsp((_Rx *)&RXUSART1);
+	  }
+
+	  if(ESPGotIP){
+		  ESPGotIP = 0;
+		  SendUDPData(0xB0);
+	  }
 	  //Recepcion por ESP8266 - Decodifica comandos provenientes de ESP8266
 	  if(RXUSART1.iw != RXUSART1.ir) {
-		  DecodeESP((_Rx *)&RXUSART1);
+	//		  DecodeESP((_Rx *)&RXUSART1);
 	  }
 	  //Si la decodificacion resulta de un dato proveniente de PC, se decodifica header
 	  if(DecodeHeaderESP){
@@ -1230,6 +1262,13 @@ int main(void)
 		  else{
 			  huart1.Instance->DR = txUSART1Buff[TXUSART1.ir++];
 		  }
+	  }
+
+	  //Reset ESPE8266
+	  if((HAL_GPIO_ReadPin(GPIOB, ENABLE_ESP_Pin) == GPIO_PIN_RESET) && On3000ms){
+		  HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_SET);
+		  On3000ms = 0;
+		  HAL_UART_Receive_IT(&huart1,rxUSART1Buff,1);
 	  }
   }
   /* USER CODE END 3 */
