@@ -149,7 +149,7 @@ uint8_t txUSBBuff[256], txUSART1Buff[256];
 uint8_t DecodeCIPSEND, IndiceIPD, IndiceDisconnect;
 //uint8_t LengthIp;
 char CantBytes[2];
-uint8_t Estado, Indice;
+uint8_t Estado, Indice, Data;
 /*********************************************************************************/
 _work w;
 
@@ -246,11 +246,15 @@ void ErrorCuadratico();
  */
 void PID(uint16_t PWMA,uint16_t PWMB);
 
-void SendUDPData(uint8_t cmd);
+//void SendUDPData(uint8_t cmd, uint8_t Time);
+
+void SendUDPData();
 
 void ADC();
 
 void Reset();
+
+void PutCIPSENDOnTx(const char * CantDatos);
 /**********************************************************************************/
 /**********************************************************************************/
 /**********************************************************************************/
@@ -682,7 +686,6 @@ void DecodeESP(_Rx *RXUSART1){
 //		}
 //	}
 
-
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if(huart->Instance==USART1){
@@ -703,6 +706,8 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 }
 void ADC(){
 	volatile uint8_t c;
+
+/***********************************************************************************/
 /********************* Media movil de las 3 primeras lecturas **********************/
 	if(FirtScan){
 		switch(iAdc){
@@ -848,101 +853,133 @@ void DecodeCmd(_Rx *RX, _Tx *TX){
 
     switch(RX->Buff[RX->iData]){
 
-//    	/*
-//		 * Comando para enviar datos IR
-//		 */
-//		case 0xA0:                                                              //Sensores analogicos
-//			//if(espConnected)PutCIPSENDOnTx(23);
-//				PutHeaderOnTx(TX, 0xA0, 17);
-//				PutBuffOnTx(TX, (uint8_t *)&bufADC[iAdc-2], 16);
-//				PutcksOnTx(TX);
-//		break;
-//
-//    	/*
-//         * Comando para enviar alive
-//         */
-//        case 0xF0:                                                              //Alive
-//			if(espConnected)PutCIPSENDOnTx(10);
-//        	PutHeaderOnTx(TX, 0xF0, 2);
-//            PutByteOnTx(TX, 0x0D);
-//            PutcksOnTx(TX);
-//            break;
-//        /*
-//         * Comando para enviar aviso de error
-//         */
-//        default:
-//			if(espConnected)PutCIPSENDOnTx(8);
-//        	PutHeaderOnTx(TX, 0xFF, 1);
-//            PutcksOnTx(TX);
-//            break;
+    	/*
+         * Comando para enviar alive
+         */
+        case 0xF0:                                                              //Alive
+			if(espConnected){
+				SendUDPData(0xF0, 1);
+			}
+			else{
+	        	PutHeaderOnTx((_Tx *)&TXUSB, 0xF0, 2);
+	            PutByteOnTx((_Tx *)&TXUSB, 0x0D);
+	            PutcksOnTx((_Tx *)&TXUSB);
+			}
+            break;
+        /*
+         * Comando para enviar aviso de error
+         */
+        default:
+			if(espConnected){
+				SendUDPData(0xFF, 1);
+			}
+			else{
+	        	PutHeaderOnTx((_Tx *)&TXUSB, 0xFF, 1);
+	            PutcksOnTx((_Tx *)&TXUSB);
+			}
+            break;
     }
 }
 
-void SendUDPData(uint8_t cmd){
-	switch(cmd){
-		/*Alive ESP*/
-		case 0xF0:
-
-			if((ECOCIPSEND0xF0) && (!Count3000ms)){
-				PutHeaderOnTx((_Tx *)&TXUSART1, 0xF0, 2);
-				PutByteOnTx((_Tx *)&TXUSART1, 0x0D);
-				PutcksOnTx((_Tx *)&TXUSART1);
-				ECOCIPSEND0xF0 = 0;
-				Count3000ms = 1;
-			}
-
-			if((!ECOCIPSEND0xF0) && (!Count3000ms)){
-				PutStrOnTx((_Tx *)&TXUSART1, CIPSEND);
-				PutStrOnTx((_Tx *)&TXUSART1, "9");
-				strcpy(CantBytes, (const char *) 9);
-				TXUSART1.Buff[TXUSART1.iw++] = '\r';
-				TXUSART1.iw &= TXUSART1.maskSize;
-				TXUSART1.Buff[TXUSART1.iw++] = '\n';
-				TXUSART1.iw &= TXUSART1.maskSize;
-				ECOCIPSEND0xF0 = 1;
-				Count3000ms = 25;
-			}
-
-
-		break;
-		/*
-		 * Comando para enviar datos IR
-		 */
-		case 0xA0:                                                              //Sensores analogicos
-
-
-			if((!Count500ms) && (ECOCIPSEND0xA0)){
-				PutHeaderOnTx((_Tx *)&TXUSART1, 0xA0, 17);
-				PutBuffOnTx((_Tx *)&TXUSART1, (uint8_t *)&bufADC[iAdc], 16);
-				PutcksOnTx((_Tx *)&TXUSART1);
-				ECOCIPSEND0xA0 = 0;
-				Count500ms = 1;
-			}
-
-			if((!ECOCIPSEND0xA0) && (!Count500ms)){
-				PutStrOnTx((_Tx *)&TXUSART1, CIPSEND);
-				PutStrOnTx((_Tx *)&TXUSART1, "24");
-				strcpy(CantBytes, (const char *) 24);
-				TXUSART1.Buff[TXUSART1.iw++] = '\r';
-				TXUSART1.iw &= TXUSART1.maskSize;
-				TXUSART1.Buff[TXUSART1.iw++] = '\n';
-				TXUSART1.iw &= TXUSART1.maskSize;
-				ECOCIPSEND0xA0 = 1;
-				Count500ms = 2;
-			}
-
-
-		break;
-//		/*ESP8266 IP*/
-//		case 0xB0:
-//			if(espConnected)PutCIPSENDOnTx(24);
-//			PutHeaderOnTx((_Tx *)&TXUSART1, 0xB0, 16);
-//			PutBuffOnTx((_Tx *)&TXUSART1, (uint8_t *)&EspIp, 15);
-//			PutcksOnTx((_Tx *)&TXUSART1);
-//		break;
-	}
-	//PutHeaderOnTx((_Tx *)&TXUSB, 0xE0, 2);
+void PutCIPSENDOnTx(const char * CantDatos){
+	PutStrOnTx((_Tx *)&TXUSART1, CIPSEND);
+	PutStrOnTx((_Tx *)&TXUSART1, CantDatos);
+	TXUSART1.Buff[TXUSART1.iw++] = '\r';
+	TXUSART1.iw &= TXUSART1.maskSize;
+	TXUSART1.Buff[TXUSART1.iw++] = '\n';
+	TXUSART1.iw &= TXUSART1.maskSize;
 }
+
+void SendUDPData(){
+	switch(Data){
+		case 0:
+			PutCIPSENDOnTx("9");
+			Data++;
+		break;
+
+		case 1:
+			PutHeaderOnTx((_Tx *)&TXUSART1, 0xF0, 2);
+			PutByteOnTx((_Tx *)&TXUSART1, 0x0D);
+			PutcksOnTx((_Tx *)&TXUSART1);
+			Data++;
+		break;
+
+		case 2:
+			PutCIPSENDOnTx("24");
+			Data++;
+		break;
+
+		case 3:
+			PutHeaderOnTx((_Tx *)&TXUSART1, 0xA0, 17);
+			PutBuffOnTx((_Tx *)&TXUSART1, (uint8_t *)&bufADC[iAdc], 16);
+			PutcksOnTx((_Tx *)&TXUSART1);
+			Data = 0;
+		break;
+	}
+}
+//void SendUDPData(uint8_t cmd, uint8_t Time){
+//	switch(cmd){
+//		/*Alive ESP*/
+//		case 0xF0:
+//
+//			if((ECOCIPSEND0xF0) && (!CountAlive)){
+//				PutHeaderOnTx((_Tx *)&TXUSART1, 0xF0, 2);
+//				PutByteOnTx((_Tx *)&TXUSART1, 0x0D);
+//				PutcksOnTx((_Tx *)&TXUSART1);
+//				ECOCIPSEND0xF0 = 0;
+//				CountAlive = 1;
+//				if(RXUSART1.ISCMD){
+//					RXUSART1.ISCMD = 0;
+//				}
+//			}
+//
+//			if((!ECOCIPSEND0xF0) && (!CountAlive)){
+//				PutCIPSENDOnTx(9);
+////				PutStrOnTx((_Tx *)&TXUSART1, CIPSEND);
+////				PutStrOnTx((_Tx *)&TXUSART1, "9");
+////				strcpy(CantBytes, (const char *) 9);
+////				TXUSART1.Buff[TXUSART1.iw++] = '\r';
+////				TXUSART1.iw &= TXUSART1.maskSize;
+////				TXUSART1.Buff[TXUSART1.iw++] = '\n';
+////				TXUSART1.iw &= TXUSART1.maskSize;
+//				ECOCIPSEND0xF0 = 1;
+//				CountAlive = 20;
+//			}
+//
+//		break;
+//		/*
+//		 * Comando para enviar datos IR
+//		 */
+//		case 0xA0:                                                              //Sensores analogicos
+//
+//			if((!Count500ms) && (ECOCIPSEND0xA0)){
+//				PutHeaderOnTx((_Tx *)&TXUSART1, 0xA0, 17);
+//				PutBuffOnTx((_Tx *)&TXUSART1, (uint8_t *)&bufADC[iAdc], 16);
+//				PutcksOnTx((_Tx *)&TXUSART1);
+//				ECOCIPSEND0xA0 = 0;
+//				Count500ms = 1;
+//			}
+//
+//			if((!ECOCIPSEND0xA0) && (!Count500ms)){
+//				PutCIPSENDOnTx(24);
+////				PutStrOnTx((_Tx *)&TXUSART1, CIPSEND);
+////				PutStrOnTx((_Tx *)&TXUSART1, "24");
+////				strcpy(CantBytes, (const char *) 24);
+////				TXUSART1.Buff[TXUSART1.iw++] = '\r';
+////				TXUSART1.iw &= TXUSART1.maskSize;
+////				TXUSART1.Buff[TXUSART1.iw++] = '\n';
+////				TXUSART1.iw &= TXUSART1.maskSize;
+//				ECOCIPSEND0xA0 = 1;
+//				Count500ms = Time;
+//			}
+//
+//		break;
+//
+//		case 0xFF:
+//
+//		break;
+//	}
+//}
 
 void PutStrOnTx(_Tx *TX, const char *str)
 {
@@ -1174,20 +1211,31 @@ int main(void)
 		  HAL_GPIO_TogglePin(LED13_GPIO_Port, LED13_Pin);
 
 		  if(espConnected){
-			  if(Count3000ms > 0){
-				  Count3000ms--;
-				  if(!Count3000ms){
-					SendUDPData(0xF0);
-//					Count3000ms = 1;
-				  }
+			  if(Count200ms > 0){
+				  Count200ms--;
 			  }
-
-			  if(Count500ms > 0){
-				  Count500ms--;
-				  if(!Count500ms){
-					  SendUDPData(0xA0);
-				  }
+			  if(!Count200ms){
+				  Count200ms = 1;
+				  SendUDPData();
 			  }
+//			  if(CountAlive > 0){
+//				  CountAlive--;
+//			  }
+//
+//			  if(Count3000ms > 0){
+//				  Count3000ms--;
+//				  if(!Count3000ms){
+//					SendUDPData(0xF0,20);
+////					Count3000ms = 1;
+//				  }
+//			  }
+//
+//			  if(Count500ms > 0){
+//				  Count500ms--;
+//				  if(!Count500ms){
+//					  SendUDPData(0xA0,2);
+//				  }
+//			  }
 		  }
 
 		  //Utilizado como delay para no capturar basura de la ESP8266 al iniciarla
