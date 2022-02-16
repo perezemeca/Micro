@@ -62,6 +62,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define LED13_Pin GPIO_PIN_13
 #define LED13_GPIO_Port GPIOC
+#define RESET_ESP_Pin GPIO_PIN_4
+#define RESET_ESP_GPIO_Port GPIOB
 #define ENABLE_ESP_Pin GPIO_PIN_5
 #define ENABLE_ESP_GPIO_Port GPIOB
 /* USER CODE BEGIN Private defines */

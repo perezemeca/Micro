@@ -27,6 +27,7 @@
 #include "utils.h"
 #include "usbd_cdc_if.h"
 #include "string.h"
+#include "math.h"
 
 /* USER CODE END Includes */
 
@@ -48,8 +49,8 @@
 /************************* Longitud de respuestas ESP *****************************/
 //#define LONG_CWJAP_	35
 #define LONG_CWJAP_	36
-//#define LONG_ANS_CWJAP_ 70
-#define LONG_ANS_CWJAP_ 71
+//#define LONG_ANS_CWJAP_ 87
+#define LONG_ANS_CWJAP_ 88
 /**********************************************************************************/
 
 /************************************ Bits ****************************************/
@@ -60,9 +61,11 @@
 #define ESPGotIP				flag1.bit.b4
 #define ESPReadyToRecyb			flag1.bit.b5
 #define DecodeIPD				flag1.bit.b6
-#define ECOCIPSEND				flag1.bit.b7
+#define ECOCIPSEND0xF0			flag1.bit.b7
 
 #define ResetESP				flag2.bit.b0
+#define SentDataESP				flag2.bit.b1
+#define ECOCIPSEND0xA0			flag2.bit.b2
 
 /**********************************************************************************/
 /* USER CODE END PD */
@@ -91,7 +94,7 @@ const char AT[]="AT\r\n";
 const char CWJAP_[]="AT+CWJAP=\"HGW-635534\",\"123456789!\"\r\n";
 const char CIFSR[] = "AT+CIFSR\r\n";
 const char CIPMUX[] = "AT+CIPMUX=0\r\n";
-const char CIPSTART[]="AT+CIPSTART=\"UDP\",\"192.168.0.5\",30011,3011\r\n";
+const char CIPSTART[]="AT+CIPSTART=\"UDP\",\"192.168.101.11\",30011,3011\r\n";
 const char CIPSEND[] = "AT+CIPSEND=";
 const char CIPCLOSE[] = "AT+CIPCLOSE\r\n";
 const char CWQAP[] = "AT+CWQAP\r\n";
@@ -102,18 +105,18 @@ const char CWMODE[] = "AT+CWMODE=3\r\n";
 const char ANS_CWMODE[] = "AT+CWMODE=3\r\n\r\nOK\r\n"; //19
 const char ANS_CWQAP[] = "AT+CWQAP\r\n\r\nOK\r\n"; //16
 //const char ANS_CWJAP_[]="AT+CWJAP=\"MICROS\",\"micros1234567\"\r\nWIFI CONNECTED\r\nWIFI GOT IP\r\n\r\nOK\r\n";//70
-const char ANS_CWJAP_[]="AT+CWJAP=\"HGW-635534\",\"123456789!\"\r\nWIFI CONNECTED\r\nWIFI GOT IP\r\n\r\nOK\r\n";//71
+const char ANS_CWJAP_[]="AT+CWJAP=\"HGW-635534\",\"123456789!\"\r\nWIFI DISCONNECT\r\nWIFI CONNECTED\r\nWIFI GOT IP\r\n\r\nOK\r\n";//88
 const char ANS_CIPMUX[] = "AT+CIPMUX=0\r\n\r\nOK\r\n"; //19
 const char ANS_CIFSR[] = "AT+CIFSR\r\n";
 const char ANS_CIFSR_STAIP[] = "+CIFSR:STAIP,\"";
-const char ANS_CIPSTART[]="AT+CIPSTART=\"UDP\",\"192.168.1.5\",30011,3011\r\nCONNECT\r\n\r\nOK\r\n";//59
+const char ANS_CIPSTART[]="AT+CIPSTART=\"UDP\",\"192.168.101.11\",30011,3011\r\nCONNECT\r\n\r\nOK\r\n";//62
 const char ANS_AT[] = "AT\r\n\r\nOK\r\n";
 const char AUTOMATIC_WIFI_CONNECTED[] = {"rIFI CONNECTED\r\nWIFI GOT IP\r\n"};
-const char WIFI_DISCONNECT[] = "rIFI DISCONNECT\r\n";
+const char WIFI_DISCONNECT[] = "WIFI DISCONNECT\r\n";
 const char CIFSR_STAIP[] = "+CIFSR:STAIP,\"";
 const char OK[]="\r\nOK\r\n";
 const char CIPSEND1[]={"AT+CIPSEND="};
-const char CIPSEND2[]={"\r\n\r\nOK\r\n> "};
+const char CIPSEND2[]={"\r\n\r\nOK\r\n>"};
 const char CIPSEND3[]={"\r\nRecv "};
 const char CIPSEND4[]={" bytes\r\n\r\nSEND OK\r\n"};
 const char IPD[]={"\r\n+IPD,"};
@@ -135,17 +138,18 @@ uint8_t Kp, Ki, Kd;
 /*********************************************************************************/
 
 /***************************** Contadores timmer *********************************/
-volatile uint16_t TimeOut, On10ms, On100ms, On200ms, On3000ms, On500ms, Count100ms, Count200ms, Count3000ms, Count500ms;
+volatile uint16_t DecodeTimeOut, On5ms, On100ms, On200ms, On3000ms, On500ms, Count100ms, Count200ms, Count3000ms, Count500ms;
 /*********************************************************************************/
 
 /********************** Comunicación - Buffer e indices  *************************/
 volatile _Rx RXUSB, RXUSART1;
 _Tx TXUSB, TXUSART1;
-uint8_t rxUSBBuff[256], rxUSART1Buff[256];
+uint8_t rxUSBBuff[256], rxUSART1Buff[256] = {};
 uint8_t txUSBBuff[256], txUSART1Buff[256];
-uint8_t DecodeCIPSEND, DecodeCIFSR;
-uint8_t LengthIp;
-char EspIp[15];
+uint8_t DecodeCIPSEND, IndiceIPD, IndiceDisconnect;
+//uint8_t LengthIp;
+char CantBytes[2];
+uint8_t Estado, Indice;
 /*********************************************************************************/
 _work w;
 
@@ -229,12 +233,6 @@ void InitEsp(_Rx *RXUSART1);
  *
  */
 void DecodeESP(_Rx *RXUSART1);
-/*
- * Cargo comando CIPSEND en buffer Tx de ESP8266
- *Parametro length indica cantidad de bytes a transmitir
- *
- */
-void PutCIPSENDOnTx(uint8_t length);
 
 /*
  * Calculo de error cuadratico
@@ -249,6 +247,10 @@ void ErrorCuadratico();
 void PID(uint16_t PWMA,uint16_t PWMB);
 
 void SendUDPData(uint8_t cmd);
+
+void ADC();
+
+void Reset();
 /**********************************************************************************/
 /**********************************************************************************/
 /**********************************************************************************/
@@ -337,44 +339,53 @@ void ErrorCuadratico(){
 }
 
 void InitEsp(_Rx *RXUSART1){
-	switch(RXUSART1->state){
+	switch(Estado){
 		case 0:
-//			PutStrOnTx(&TXUSART1,AT); //Envio comando AT para ver si responde el ESP
-//			//PutStrOnTx(&TXUSB,AT);    // Depuracion por USB
-			Count500ms = 5;
+			PutStrOnTx((_Tx *)&TXUSART1,AT); //Envio comando AT para ver si responde el ESP
+			PutStrOnTx((_Tx *)&TXUSB,AT);    // Depuracion por USB
 		break;
 
 		case 1:
-			PutStrOnTx(&TXUSART1,CWMODE); //Envio comando CWMODE
-			//PutStrOnTx(&TXUSB,CWMODE);    // Depuracion por USB
-			Count500ms = 5;
+			PutStrOnTx((_Tx *)&TXUSART1,CWMODE); //Envio comando CWMODE
+			PutStrOnTx((_Tx *)&TXUSB,CWMODE);    // Depuracion por USB
+
 		break;
 
 		case 2:
-			PutStrOnTx(&TXUSART1,CWJAP_); //Envio comando CWJAP con los datos de la red
-			//PutStrOnTx(&TXUSB,CWJAP_);    // Depuracion por USB
-			Count3000ms = 30;
+			PutStrOnTx((_Tx *)&TXUSART1,CWJAP_); //Envio comando CWJAP con los datos de la red
+			PutStrOnTx((_Tx *)&TXUSB,CWJAP_);    // Depuracion por USB
+
 		break;
 
+//		case 3:
+//			PutStrOnTx((_Tx *)&TXUSART1,CIFSR);
+//			PutStrOnTx((_Tx *)&TXUSB,CIFSR);    // Depuracion por USB
+//
+//		break;
+
 		case 3:
-			PutStrOnTx(&TXUSART1,CIFSR);
-			//PutStrOnTx(&TXUSB,CIFSR);    // Depuracion por USB
-			Count500ms = 5;
+			PutStrOnTx((_Tx *)&TXUSART1,CIPMUX);
+			PutStrOnTx((_Tx *)&TXUSB,CIPMUX);    // Depuracion por USB
+
 		break;
 
 		case 4:
-			PutStrOnTx(&TXUSART1,CIPMUX);
-			//PutStrOnTx(&TXUSB,CIPMUX);    // Depuracion por USB
-			Count500ms = 5;
-		break;
+			PutStrOnTx((_Tx *)&TXUSART1,CIPSTART);
+			PutStrOnTx((_Tx *)&TXUSB,CIPSTART);    // Depuracion por USB
 
-		case 5:
-			PutStrOnTx(&TXUSART1,CIPSTART);
-			//PutStrOnTx(&TXUSB,CIPSTART);    // Depuracion por USB
-			Count3000ms = 30;
 		break;
 	}
+	DecodeTimeOut = 4;
 	ESPReadyToRecyb = 1;
+}
+
+void Reset(){
+	espConnected = 0;
+	ESPReadyToRecyb = 1;
+	ResetESP = 1;
+	HAL_UART_AbortReceive_IT(&huart1);
+	HAL_GPIO_WritePin(GPIOB, RESET_ESP_Pin, GPIO_PIN_RESET);//Reset ESP8266
+	DecodeTimeOut = 20;
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
@@ -389,9 +400,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 		if(!Count100ms){
 			Count100ms = 100;
 			On100ms = 1;
-		}
-		if(Count100ms % 10 == 0){
-			On10ms = 1;
 		}
 
 		if(RXUSB.header) {
@@ -415,352 +423,297 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 }
 
 void DecodeESP(_Rx *RXUSART1){
-	if(!espConnected){
-		switch(RXUSART1->state){
-			case 0:
-				if(On500ms){
-					if(RXUSART1->Buff[RXUSART1->ir]==AUTOMATIC_WIFI_CONNECTED[RXUSART1->i]){
-						RXUSART1->i++;
-						if(RXUSART1->i==29){
-							RXUSART1->i=0;
-							RXUSART1->state = 1;
-							On500ms = 0;
-						}
-					}
-					else{
-						if(RXUSART1->Buff[RXUSART1->ir]==WIFI_DISCONNECT[RXUSART1->i]){
-							RXUSART1->i++;
-							if(RXUSART1->i==17){
-								RXUSART1->i=0;
-								RXUSART1->state = 0;
-								On500ms = 0;
-								espConnected = 0;
-								ESPReadyToRecyb = 0;
-								ResetESP = 1;
-								HAL_UART_AbortReceive_IT(&huart1);
-								HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_RESET);//Reset ESP8266
-								TimeOut = 40;
-							}
-						}
-						else{
-							RXUSART1->ir = RXUSART1->iw;
-							RXUSART1->i=0;
-							RXUSART1->state = 0;
-							ResetESP = 1;
-							HAL_UART_AbortReceive_IT(&huart1);
-							HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_RESET);//Reset ESP8266
-							TimeOut = 40;
-						}
 
-					}
-//					if(RXUSART1->Buff[RXUSART1->ir]==ANS_AT[RXUSART1->i]){
-//						RXUSART1->i ++;
-//						if(RXUSART1->i ==10){
-//							RXUSART1->i =0;
-//							RXUSART1->state = 1;
-//							On500ms = 0;
-//							ESPReadyToRecyb = 0;
-//						}
-//					}
-//					if((RXUSART1->Buff[RXUSART1->ir]=='r' || RXUSART1->Buff[RXUSART1->ir]=='S') && RXUSART1->Buff[RXUSART1->ir++]=='A'){
-//						RXUSART1->state = 1;
-//						RXUSART1->i =0;
-//						RXUSART1->state = 1;
-//						On500ms = 0;
-//						ESPReadyToRecyb = 0;
-//					}
-//					else{
-//						if(RXUSART1->i > 0){
-//							RXUSART1->ir = RXUSART1->iw;
-//							RXUSART1->i =0;
-//						}
-//						RXUSART1->state = 10;	//Restart ESP8266
-//					}
-					RXUSART1->ir++;
-				}
-			break;
+//	if(RXUSART1->Buff[RXUSART1->ir] > 128){
+//		Reset();
+//	}
 
-			case 1:
-				if(On500ms){
-					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CWMODE[RXUSART1->i]){
-						RXUSART1->i++;
-						if(RXUSART1->i==19){
-							RXUSART1->i=0;
-							RXUSART1->state = 2;
-							On500ms = 0;
-							ESPReadyToRecyb = 0;
-						}
-					}
-					else{
-						if(RXUSART1->i>0){
-							RXUSART1->ir = RXUSART1->iw;
-							RXUSART1->i=0;
-						}
-						RXUSART1->state = 0;
-					}
-					RXUSART1->ir++;
-				}
-			break;
-
-			case 2:
-				if(On3000ms){
-					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CWJAP_[RXUSART1->i]){
-						RXUSART1->i++;
-						if(RXUSART1->i==LONG_ANS_CWJAP_){
-							RXUSART1->i=0;
-							RXUSART1->state = 3;
-							On3000ms = 0;
-							ESPReadyToRecyb = 0;
-						}
-					}
-					else{
-						if(RXUSART1->i>0){
-							RXUSART1->ir = RXUSART1->iw;
-							RXUSART1->i=0;
-						}
-						RXUSART1->state = 0;
-					}
-					RXUSART1->ir++;
-				}
-			break;
-
-			case 3:
-				if(On500ms){
-					switch(DecodeCIFSR){
-						case 0:
-							if(RXUSART1->Buff[RXUSART1->ir]==ANS_CIFSR[RXUSART1->i]){
-								RXUSART1->i++;
-								if(RXUSART1->i==10){
-									RXUSART1->i=0;
-									DecodeCIFSR = 1;
-								}
-							}
-							else{
-								if(RXUSART1->i>0){
-									RXUSART1->ir = RXUSART1->iw;
-									RXUSART1->i=0;
-								}
-								RXUSART1->state = 2;
-							}
-
-						break;
-						case 1:
-							if(RXUSART1->Buff[RXUSART1->ir]==ANS_CIFSR_STAIP[RXUSART1->i]){
-								RXUSART1->i++;
-								if(RXUSART1->i == 14){
-									DecodeCIFSR = 2;
-									RXUSART1->i = 0;
-								}
-							}
-						break;
-
-						case 2:
-							EspIp[RXUSART1->i] = RXUSART1->Buff[RXUSART1->ir];
-							RXUSART1->i++;
-							LengthIp++;
-							if(LengthIp > 0 && RXUSART1->Buff[RXUSART1->ir] == '"'){
-								RXUSART1->i = 0;
-								ESPGotIP = 1;
-								DecodeCIFSR = 3;
-							}
-						break;
-
-						case 3:
-							if(RXUSART1->Buff[RXUSART1->ir]==OK[RXUSART1->i]){
-								RXUSART1->i++;
-								if(RXUSART1->i == 6){
-									DecodeCIFSR = 0;
-									RXUSART1->i = 0;
-									RXUSART1->state = 5;
-									ESPReadyToRecyb = 0;
-									On500ms = 0;
-								}
-							}
-						break;
-						RXUSART1->ir++;
-					}
-				}
-			break;
-
-			case 4:
-				if(On500ms){
-					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CIPMUX[RXUSART1->i]){
-						RXUSART1->i++;
-						if(RXUSART1->i==19){
-							RXUSART1->i=0;
-							RXUSART1->state = 5;
-							On500ms = 0;
-							ESPReadyToRecyb = 0;
-						}
-					}
-					else{
-						if(RXUSART1->i>0){
-							RXUSART1->ir = RXUSART1->iw;
-							RXUSART1->i=0;
-						}
-						RXUSART1->state = 0;
-						ESPReadyToRecyb = 0;
-					}
-					RXUSART1->ir++;
-				}
-			break;
-			case 5:
-				if(On3000ms){
-					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CIPSTART[RXUSART1->i]){
-						RXUSART1->i++;
-						if(RXUSART1->i==59){
-							RXUSART1->i=0;
-							espConnected = 1;
-							On3000ms = 0;
-						}
-					}
-					else{
-						if(RXUSART1->i>0){
-							RXUSART1->ir = RXUSART1->iw;
-							RXUSART1->i=0;
-						}
-						RXUSART1->state = 0;
-					}
-					RXUSART1->ir++;
-				}
-			break;
-		}
-	}
-	if(ECOCIPSEND){
-		switch(DecodeCIPSEND){
-			case 0:
-				if(RXUSART1->Buff[RXUSART1->ir] == CIPSEND1[RXUSART1->i]){
-					RXUSART1->i++;
-					if(RXUSART1->i == 11){
-						RXUSART1->i = 0;
-						DecodeCIPSEND = 1;
-					}
-					else{
-						ECOCIPSEND = 0;
-						RXUSART1->i = 0;
-						RXUSART1->ir = RXUSART1->iw;
-					}
-				}
-			break;
-
-			case 1:
-				if(RXUSART1->Buff[RXUSART1->ir] == TXUSART1.OutPutBytes){
-					DecodeCIPSEND = 2;
-				}
-				else{
-					ECOCIPSEND = 0;
-					RXUSART1->ir = RXUSART1->iw;
-					DecodeCIPSEND = 0;
-				}
-			break;
-
-			case 2:
-				if(RXUSART1->Buff[RXUSART1->ir] == CIPSEND2[RXUSART1->i]){
-					RXUSART1->i++;
-					if(RXUSART1->i == 10){
-						RXUSART1->i = 0;
-						DecodeCIPSEND = 3;
-					}
-					else{
-						ECOCIPSEND = 0;
-						DecodeCIPSEND = 0;
-						RXUSART1->i = 0;
-						RXUSART1->ir = RXUSART1->iw;
-					}
-				}
-			break;
-
-			case 3:
-				if(RXUSART1->Buff[RXUSART1->ir] == CIPSEND3[RXUSART1->i]){
-					RXUSART1->i++;
-					if(RXUSART1->i == 7){
-						RXUSART1->i = 0;
-						DecodeCIPSEND = 4;
-					}
-					else{
-						ECOCIPSEND = 0;
-						DecodeCIPSEND = 0;
-						RXUSART1->i = 0;
-						RXUSART1->ir = RXUSART1->iw;
-					}
-				}
-			break;
-
-			case 4:
-				if(RXUSART1->Buff[RXUSART1->ir] == TXUSART1.OutPutBytes){
-					DecodeCIPSEND = 5;
-				}
-				else{
-					ECOCIPSEND = 0;
-					RXUSART1->ir = RXUSART1->iw;
-					DecodeCIPSEND = 0;
-				}
-			break;
-
-			case 5:
-				if(RXUSART1->Buff[RXUSART1->ir] == CIPSEND4[RXUSART1->i]){
-					RXUSART1->i++;
-					if(RXUSART1->i == 19){
-						RXUSART1->i = 0;
-						DecodeCIPSEND = 0;
-						DataSentESP = 1;
-					}
-				}
-				else{
-					ECOCIPSEND = 0;
-					DecodeCIPSEND = 0;
-					RXUSART1->i = 0;
-					RXUSART1->ir = RXUSART1->iw;
-				}
-			break;
-		}
-		RXUSART1->ir++;
-	}
-	if(DecodeIPD){
-		if(RXUSART1->Buff[RXUSART1->ir]==IPD[RXUSART1->i]){
-			RXUSART1->i++;
-			if(RXUSART1->i == 6){
-				RXUSART1->i = 0;
-				RXUSART1->ir++;
-				if(RXUSART1->Buff[RXUSART1->ir]==':'){
-					DecodeHeaderESP = 1;
-					DecodeIPD = 0;
-				}
+	if(espConnected){
+		//Decodifica \r\n+IPD,
+		if(RXUSART1->Buff[RXUSART1->ir] == IPD[IndiceIPD]){
+			IndiceIPD++;
+			if(IndiceIPD == 7){
+				DecodeIPD = 1;
 			}
 		}
 		else{
-			DecodeIPD = 0;
-			RXUSART1->i = 0;
-			RXUSART1->ir = RXUSART1->iw;
+			if((IndiceDisconnect > 0) && (!DecodeIPD)){
+				IndiceDisconnect = 0;
+			}
+		}
+
+		if(DecodeIPD){
+			if(RXUSART1->Buff[RXUSART1->ir]==':'){
+				DecodeHeaderESP = 1;
+				DecodeIPD = 0;
+			}
+		}
+
+		//Decodifica WIFI DISCONNECT\r\n
+		if(RXUSART1->Buff[RXUSART1->ir] == WIFI_DISCONNECT[IndiceDisconnect]){
+			IndiceDisconnect++;
+			if(IndiceDisconnect == 17){
+				IndiceDisconnect=0;
+				Reset();
+			}
+		}
+		else{
+			if(IndiceDisconnect > 0){
+				IndiceDisconnect = 0;
+			}
 		}
 		RXUSART1->ir++;
 	}
 
-	//ESPReadyToRecyb = 0;
+	//Decodifica inicializacion de ESP8266
+	if((!espConnected) && (!DecodeTimeOut)){
+		switch(Estado){
+			case 0:
+				if(RXUSART1->Buff[RXUSART1->ir]==ANS_AT[Indice]){
+					Indice ++;
+					RXUSART1->ir++;
+					if(Indice == 10){
+						Indice = 0;
+						Estado = 1;
+						ESPReadyToRecyb = 0;
+					}
+				}
+				else{
+					RXUSART1->ir = RXUSART1->iw;
+					Indice = 0;
+					ESPReadyToRecyb = 0;
+				}
+			break;
 
+			case 1:
+				if(RXUSART1->Buff[RXUSART1->ir]==ANS_CWMODE[Indice]){
+					Indice++;
+					RXUSART1->ir++;
+					if(Indice==19){
+						Indice=0;
+						Estado = 2;
+						ESPReadyToRecyb = 0;
+					}
+				}
+				else{
+					if(Indice>0){
+						RXUSART1->ir = RXUSART1->iw;
+						Indice=0;
+					}
+					Estado = 0;
+				}
+			break;
+
+			case 2:
+				if(RXUSART1->Buff[RXUSART1->ir]==ANS_CWJAP_[Indice]){
+					Indice++;
+					RXUSART1->ir++;
+					if(Indice==LONG_ANS_CWJAP_){
+						Indice = 0;
+						Estado = 3;
+						ESPReadyToRecyb = 0;
+					}
+				}
+				else{
+					if(Indice>0){
+						RXUSART1->ir = RXUSART1->iw;
+						Indice=0;
+					}
+					Estado = 0;
+				}
+			break;
+
+			case 3:
+					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CIPMUX[Indice]){
+						Indice++;
+						RXUSART1->ir++;
+						if(Indice == 19){
+							Indice = 0;
+							Estado = 4;
+							ESPReadyToRecyb = 0;
+						}
+					}
+					else{
+						if(Indice>0){
+							RXUSART1->ir = RXUSART1->iw;
+							Indice = 0;
+						}
+						Estado = 0;
+						ESPReadyToRecyb = 0;
+					}
+			break;
+
+			case 4:
+					if(RXUSART1->Buff[RXUSART1->ir]==ANS_CIPSTART[Indice]){
+						Indice++;
+						RXUSART1->ir++;
+						if(Indice == 62){
+							Indice = 0;
+							espConnected = 1;
+							Estado = 0;
+							Count3000ms = 7;
+						}
+					}
+					else{
+						if(Indice>0){
+							RXUSART1->ir = RXUSART1->iw;
+							Indice = 0;
+							espConnected = 1;
+							Estado = 0;
+							Count3000ms = 7;
+						}
+						Estado = 0;
+					}
+			break;
+		}
+	}
 }
+//	if((ECOCIPSEND) && (!DecodeTimeOut)){
+//		switch(DecodeCIPSEND){
+//			case 0:
+//				if(RXUSART1->Buff[RXUSART1->ir] == CIPSEND1[Indice]){
+//					TXUSB.Buff[TXUSB.iw++] = CIPSEND1[Indice];
+//					Indice++;
+//					RXUSART1->ir++;
+//					if(Indice == 11){
+//						Indice = 0;
+//						DecodeCIPSEND = 1;
+//					}
+//				}
+//				else{
+//					ECOCIPSEND = 0;
+//					Indice = 0;
+//					RXUSART1->ir = RXUSART1->iw;
+//				}
+//			break;
+//
+//			case 1:
+//				if(RXUSART1->Buff[RXUSART1->ir] == CantBytes[Indice]){
+//					Indice++;
+//					RXUSART1->ir++;
+//					if(Indice == 2){
+//						Indice = 0;
+//						DecodeCIPSEND = 2;
+//					}
+//				}
+//				else{
+//					ECOCIPSEND = 0;
+//					RXUSART1->ir = RXUSART1->iw;
+//					DecodeCIPSEND = 0;
+//				}
+//			break;
+//
+//			case 2:
+//				if(RXUSART1->Buff[RXUSART1->ir] == CIPSEND2[Indice]){
+//					Indice++;
+//					RXUSART1->ir++;
+//					if(Indice == 9){
+//						Indice = 0;
+//						DecodeCIPSEND = 3;
+//						SentDataESP = 1;
+//					}
+//				}
+//				else{
+//					ECOCIPSEND = 0;
+//					DecodeCIPSEND = 0;
+//					Indice = 0;
+//					RXUSART1->ir = RXUSART1->iw;
+//				}
+//			break;
+//
+//			case 3:
+//				if(RXUSART1->Buff[RXUSART1->ir] == CIPSEND3[Indice]){
+//					Indice++;
+//					RXUSART1->ir++;
+//					if(Indice == 7){
+//						Indice = 0;
+//						DecodeCIPSEND = 4;
+//					}
+//				}
+//				else{
+//					ECOCIPSEND = 0;
+//					DecodeCIPSEND = 0;
+//					RXUSART1->i = 0;
+//					RXUSART1->ir = RXUSART1->iw;
+//				}
+//			break;
+//
+//			case 4:
+//				if(RXUSART1->Buff[RXUSART1->ir] == CantBytes[Indice]){
+//					Indice++;
+//					RXUSART1->ir++;
+//					if(Indice == 2){
+//						Indice = 0;
+//						DecodeCIPSEND = 5;
+//					}
+//				}
+//				else{
+//					ECOCIPSEND = 0;
+//					RXUSART1->ir = RXUSART1->iw;
+//					DecodeCIPSEND = 0;
+//				}
+//			break;
+//
+//			case 5:
+//				if(RXUSART1->Buff[RXUSART1->ir] == CIPSEND4[RXUSART1->i]){
+//					Indice++;
+//					RXUSART1->ir++;
+//					if(Indice == 19){
+//						Indice = 0;
+//						DecodeCIPSEND = 0;
+//						DataSentESP = 1;
+//						ECOCIPSEND = 0;
+//						TXUSB.Buff[TXUSB.iw++] = '*';
+//						TXUSB.Buff[TXUSB.iw++] = 'L';
+//						TXUSB.Buff[TXUSB.iw++] = 'L';
+//						TXUSB.Buff[TXUSB.iw++] = 'E';
+//						TXUSB.Buff[TXUSB.iw++] = 'G';
+//						TXUSB.Buff[TXUSB.iw++] = 'O';
+//						TXUSB.Buff[TXUSB.iw++] = '*';
+//					}
+//				}
+//				else{
+//					ECOCIPSEND = 0;
+//					DecodeCIPSEND = 0;
+//					Indice = 0;
+//					RXUSART1->ir = RXUSART1->iw;
+//				}
+//			break;
+//		}
+//	}
+
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if(huart->Instance==USART1){
+		TXUSB.Buff[TXUSB.iw++] = rxUSART1Buff[RXUSART1.iw];
 		RXUSART1.iw++;
 		HAL_UART_Receive_IT(&huart1, &rxUSART1Buff[RXUSART1.iw], 1);
 	}
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
+
+	// Incrento indice del buffer
+	iAdc++;
+	if(iAdc == 32){
+		iAdc = 0;
+	}
+	ADC();
+}
+void ADC(){
 	volatile uint8_t c;
 /********************* Media movil de las 3 primeras lecturas **********************/
 	if(FirtScan){
 		switch(iAdc){
 			case 1:
 				for(c=0;c<8;c++){
-					bufADC[1][c]=(bufADC[0][c]+bufADC[1][c]) / 2 ;
+					bufADC[1][c]=round((bufADC[0][c]+bufADC[1][c]) / 2 );
 				}
 			break;
 			case 2:
 				for(c=0;c<8;c++){
-					bufADC[2][c]=(bufADC[0][c]+bufADC[1][c]+bufADC[2][c]) / 3;
+					bufADC[2][c]=round((bufADC[0][c]+bufADC[1][c]+bufADC[2][c]) / 3);
 				}
 				FirtScan = 0;
 			break;
@@ -778,12 +731,12 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 			switch(iAdc){
 				case 0:
 					for(c = 0; c<8; c++){
-						bufADC[0][c]=( bufADC[0][c]+bufADC[31][c]+bufADC[30][c]) / 3 ;
+						bufADC[0][c]=round(( bufADC[0][c]+bufADC[31][c]+bufADC[30][c]) / 3) ;
 					}
 				break;
 				case 1:
 					for(c = 0; c<8; c++){
-						bufADC[1][c]=(bufADC[0][c]+bufADC[1][c]+bufADC[31][c]) / 3;
+						bufADC[1][c]=round((bufADC[0][c]+bufADC[1][c]+bufADC[31][c]) / 3);
 					}
 				break;
 			}
@@ -791,18 +744,12 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 		else{
 			// Cálculo comprendido entre bufADC[2] y bufADC[31]
 			for(c = 0; c<8; c++){
-				bufADC[iAdc][c] = (bufADC[iAdc-2][c] + bufADC[iAdc-1][c] + bufADC[iAdc][c])/3;
+				bufADC[iAdc][c] = round((bufADC[iAdc-2][c] + bufADC[iAdc-1][c] + bufADC[iAdc][c])/3);
 			}
 		}
 	}
 /***********************************************************************************/
-	// Incrento indice del buffer
-	iAdc++;
-	if(iAdc == 32){
-		iAdc = 0;
-	}
 }
-
 void MyCallBackOnUSBData(uint8_t *buf, uint32_t len){
 	for(uint32_t i=0; i<len; i++){
 		rxUSBBuff[RXUSB.iw++] = buf[i];
@@ -901,33 +848,33 @@ void DecodeCmd(_Rx *RX, _Tx *TX){
 
     switch(RX->Buff[RX->iData]){
 
-    	/*
-		 * Comando para enviar datos IR
-		 */
-		case 0xA0:                                                              //Sensores analogicos
-			if(espConnected)PutCIPSENDOnTx(24);
-				PutHeaderOnTx(TX, 0xA0, 17);
-				PutBuffOnTx(TX, (uint8_t *)&bufADC[iAdc-2], 16);
-				PutcksOnTx(TX);
-		break;
-
-    	/*
-         * Comando para enviar alive
-         */
-        case 0xF0:                                                              //Alive
-			if(espConnected)PutCIPSENDOnTx(10);
-        	PutHeaderOnTx(TX, 0xF0, 2);
-            PutByteOnTx(TX, 0x0D);
-            PutcksOnTx(TX);
-            break;
-        /*
-         * Comando para enviar aviso de error
-         */
-        default:
-			if(espConnected)PutCIPSENDOnTx(9);
-        	PutHeaderOnTx(TX, 0xFF, 1);
-            PutcksOnTx(TX);
-            break;
+//    	/*
+//		 * Comando para enviar datos IR
+//		 */
+//		case 0xA0:                                                              //Sensores analogicos
+//			//if(espConnected)PutCIPSENDOnTx(23);
+//				PutHeaderOnTx(TX, 0xA0, 17);
+//				PutBuffOnTx(TX, (uint8_t *)&bufADC[iAdc-2], 16);
+//				PutcksOnTx(TX);
+//		break;
+//
+//    	/*
+//         * Comando para enviar alive
+//         */
+//        case 0xF0:                                                              //Alive
+//			if(espConnected)PutCIPSENDOnTx(10);
+//        	PutHeaderOnTx(TX, 0xF0, 2);
+//            PutByteOnTx(TX, 0x0D);
+//            PutcksOnTx(TX);
+//            break;
+//        /*
+//         * Comando para enviar aviso de error
+//         */
+//        default:
+//			if(espConnected)PutCIPSENDOnTx(8);
+//        	PutHeaderOnTx(TX, 0xFF, 1);
+//            PutcksOnTx(TX);
+//            break;
     }
 }
 
@@ -935,19 +882,76 @@ void SendUDPData(uint8_t cmd){
 	switch(cmd){
 		/*Alive ESP*/
 		case 0xF0:
-			if(espConnected)PutCIPSENDOnTx(10);
-			PutHeaderOnTx((_Tx *)&TXUSART1, 0xF0, 2);
-			PutByteOnTx((_Tx *)&TXUSART1, 0x0D);
-			PutcksOnTx((_Tx *)&TXUSART1);
+
+			if((ECOCIPSEND0xF0) && (!Count3000ms)){
+				PutHeaderOnTx((_Tx *)&TXUSART1, 0xF0, 2);
+				PutByteOnTx((_Tx *)&TXUSART1, 0x0D);
+				PutcksOnTx((_Tx *)&TXUSART1);
+				ECOCIPSEND0xF0 = 0;
+				Count3000ms = 1;
+			}
+
+			if((!ECOCIPSEND0xF0) && (!Count3000ms)){
+				PutStrOnTx((_Tx *)&TXUSART1, CIPSEND);
+				PutStrOnTx((_Tx *)&TXUSART1, "9");
+				strcpy(CantBytes, (const char *) 9);
+				TXUSART1.Buff[TXUSART1.iw++] = '\r';
+				TXUSART1.iw &= TXUSART1.maskSize;
+				TXUSART1.Buff[TXUSART1.iw++] = '\n';
+				TXUSART1.iw &= TXUSART1.maskSize;
+				ECOCIPSEND0xF0 = 1;
+				Count3000ms = 25;
+			}
+
+
 		break;
-		/*ESP8266 IP*/
-		case 0xB0:
-			if(espConnected)PutCIPSENDOnTx(24);
-			PutHeaderOnTx((_Tx *)&TXUSART1, 0xB0, 16);
-			PutBuffOnTx((_Tx *)&TXUSART1, (uint8_t *)&EspIp, 15);
-			PutcksOnTx((_Tx *)&TXUSART1);
+		/*
+		 * Comando para enviar datos IR
+		 */
+		case 0xA0:                                                              //Sensores analogicos
+
+
+			if((!Count500ms) && (ECOCIPSEND0xA0)){
+				PutHeaderOnTx((_Tx *)&TXUSART1, 0xA0, 17);
+				PutBuffOnTx((_Tx *)&TXUSART1, (uint8_t *)&bufADC[iAdc], 16);
+				PutcksOnTx((_Tx *)&TXUSART1);
+				ECOCIPSEND0xA0 = 0;
+				Count500ms = 1;
+			}
+
+			if((!ECOCIPSEND0xA0) && (!Count500ms)){
+				PutStrOnTx((_Tx *)&TXUSART1, CIPSEND);
+				PutStrOnTx((_Tx *)&TXUSART1, "24");
+				strcpy(CantBytes, (const char *) 24);
+				TXUSART1.Buff[TXUSART1.iw++] = '\r';
+				TXUSART1.iw &= TXUSART1.maskSize;
+				TXUSART1.Buff[TXUSART1.iw++] = '\n';
+				TXUSART1.iw &= TXUSART1.maskSize;
+				ECOCIPSEND0xA0 = 1;
+				Count500ms = 2;
+			}
+
+
 		break;
+//		/*ESP8266 IP*/
+//		case 0xB0:
+//			if(espConnected)PutCIPSENDOnTx(24);
+//			PutHeaderOnTx((_Tx *)&TXUSART1, 0xB0, 16);
+//			PutBuffOnTx((_Tx *)&TXUSART1, (uint8_t *)&EspIp, 15);
+//			PutcksOnTx((_Tx *)&TXUSART1);
+//		break;
 	}
+	//PutHeaderOnTx((_Tx *)&TXUSB, 0xE0, 2);
+}
+
+void PutStrOnTx(_Tx *TX, const char *str)
+{
+    uint8_t i = 0;
+
+    while(str[i]) {
+        TX->Buff[TX->iw++] = str[i++];
+        TX->iw &= TX->maskSize;
+    }
 }
 
 void PutByteOnTx(_Tx *TX, uint8_t value)
@@ -965,15 +969,6 @@ void PutBuffOnTx(_Tx *TX, uint8_t *buf, uint8_t length)
     	TX->Buff[TX->iw++] = buf[i];
     	TX->iw &= TX->maskSize;
     }
-}
-
-void PutCIPSENDOnTx(uint8_t length){
-
-	for(uint8_t i=0; i<11; i++){
-		TXUSART1.Buff[TXUSART1.iw++] = CIPSEND[i];
-	}
-	TXUSART1.Buff[TXUSART1.iw++] = length;
-	TXUSART1.OutPutBytes = length;
 }
 
 void PutHeaderOnTx(_Tx *TX, uint8_t cmd, uint8_t CantDatos)
@@ -1011,16 +1006,6 @@ void PutcksOnTx(_Tx *TX)
 
     TX->Buff[TX->iw++] = cks;
     TX->iw &= TX->maskSize;
-}
-
-void PutStrOnTx(_Tx *TX, const char *str)
-{
-    uint8_t i = 0;
-
-    while(str[i]) {
-        TX->Buff[TX->iw++] = str[i++];
-        TX->iw &= TX->maskSize;
-    }
 }
 
 /* USER CODE END 0 */
@@ -1066,7 +1051,8 @@ int main(void)
   HAL_TIM_Base_Start_IT(&htim4);
   HAL_TIM_Base_Start_IT(&htim3);
   //Enable ESP8266
-  HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_SET);	//Enable ESP8266
+  HAL_GPIO_WritePin(GPIOB, RESET_ESP_Pin, GPIO_PIN_SET);	//Reset ESP8266
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
@@ -1081,8 +1067,8 @@ int main(void)
   Count100ms = 100;
   Count200ms = 0;
   Count3000ms = 0;
-  Count500ms = 0;
-  TimeOut = 40;
+  Count500ms = 5;
+  DecodeTimeOut = 60;
 /***********************************************************************************/
 /***********************************************************************************/
 /***********************************************************************************/
@@ -1115,8 +1101,6 @@ int main(void)
   RXUSART1.header = 0;
   RXUSART1.maskSize = 255;
   RXUSART1.ISCMD = 0;
-  //RXUSART1.state indica en que estado se encuentra la ESP8266
-  RXUSART1.state = 0;
 
   TXUSART1.Buff = txUSART1Buff;
   TXUSART1.iw = 0;
@@ -1129,8 +1113,12 @@ int main(void)
   DecodeCIPSEND = 0;
   DecodeHeaderESP = 0;
   ESPReadyToRecyb = 0;
-  ECOCIPSEND = 0;
+  ECOCIPSEND0xF0 = 0;
+  ECOCIPSEND0xA0 = 0;
   ResetESP = 1;
+  Estado = 0;
+  Indice = 0;
+  SentDataESP = 0;
 
 /***********************************************************************************/
 /***********************************************************************************/
@@ -1185,21 +1173,27 @@ int main(void)
 		  On100ms = 0;
 		  HAL_GPIO_TogglePin(LED13_GPIO_Port, LED13_Pin);
 
-		  if(Count3000ms > 0) Count3000ms--;
-		  if(!Count3000ms){
-			  On3000ms = 1;
+		  if(espConnected){
+			  if(Count3000ms > 0){
+				  Count3000ms--;
+				  if(!Count3000ms){
+					SendUDPData(0xF0);
+//					Count3000ms = 1;
+				  }
+			  }
+
+			  if(Count500ms > 0){
+				  Count500ms--;
+				  if(!Count500ms){
+					  SendUDPData(0xA0);
+				  }
+			  }
 		  }
-		  if(Count500ms > 0){
-			  Count500ms--;
-		  }
-		  if(!Count500ms){
-			  On500ms = 1;
-		  }
+
 		  //Utilizado como delay para no capturar basura de la ESP8266 al iniciarla
-		  if(TimeOut > 0){
-			  TimeOut--;
+		  if(DecodeTimeOut > 0){
+			  DecodeTimeOut--;
 		  }
-		  //SendUDPData(0xF0);
 	  }
 
 	  //Recepcion por USB - Decodifica header
@@ -1223,25 +1217,23 @@ int main(void)
 		  }
 		  TXUSB.ir &= TXUSB.maskSize;
 	  }
-	  //Primera inicializacion de ESP8266 y Restart
-	  if((!TimeOut) && (ResetESP)){
+
+	  //Primera inicializacion de ESP8266 y Reset
+	  if((!DecodeTimeOut) && (ResetESP) && (!ESPReadyToRecyb)){
 		  InitEsp((_Rx *)&RXUSART1);
 		  //Interrupcion para recibir datos desde ESP8266
 		  HAL_UART_Receive_IT(&huart1,rxUSART1Buff,1);
 		  ResetESP = 0;
 	  }
+
 	  //Continua con los casos para iniciar
-	  if((!espConnected) && (!ESPReadyToRecyb) && (!ResetESP)){
+	  if((!espConnected) && (!ESPReadyToRecyb) && (!ResetESP) && (!DecodeTimeOut)){
 		  InitEsp((_Rx *)&RXUSART1);
 	  }
 
-	  if(ESPGotIP){
-		  ESPGotIP = 0;
-		  SendUDPData(0xB0);
-	  }
 	  //Recepcion por ESP8266 - Decodifica comandos provenientes de ESP8266
-	  if(RXUSART1.iw != RXUSART1.ir) {
-	//		  DecodeESP((_Rx *)&RXUSART1);
+	  if(RXUSART1.iw != RXUSART1.ir){
+		  DecodeESP((_Rx *)&RXUSART1);
 	  }
 	  //Si la decodificacion resulta de un dato proveniente de PC, se decodifica header
 	  if(DecodeHeaderESP){
@@ -1255,20 +1247,15 @@ int main(void)
 
 	  //Transmision por ESP8266
 	  if(TXUSART1.iw != TXUSART1.ir) {
-		  if(huart1.Instance->SR){
-			  huart1.Instance->DR = txUSART1Buff[TXUSART1.ir++];
-			  TXUSART1.ir=TXUSART1.iw;
-		  }
-		  else{
+		  if((huart1.Instance->SR & UART_FLAG_TXE) == UART_FLAG_TXE){
 			  huart1.Instance->DR = txUSART1Buff[TXUSART1.ir++];
 		  }
 	  }
 
 	  //Reset ESPE8266
-	  if((HAL_GPIO_ReadPin(GPIOB, ENABLE_ESP_Pin) == GPIO_PIN_RESET) && On3000ms){
-		  HAL_GPIO_WritePin(GPIOB, ENABLE_ESP_Pin, GPIO_PIN_SET);
-		  On3000ms = 0;
-		  HAL_UART_Receive_IT(&huart1,rxUSART1Buff,1);
+	  if((HAL_GPIO_ReadPin(GPIOB, RESET_ESP_Pin) == GPIO_PIN_RESET) && (!DecodeTimeOut) && (ResetESP) && (ESPReadyToRecyb)){
+		  HAL_GPIO_WritePin(GPIOB, RESET_ESP_Pin, GPIO_PIN_SET);
+		  ResetESP = 1;
 	  }
   }
   /* USER CODE END 3 */
@@ -1639,7 +1626,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(LED13_GPIO_Port, LED13_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(ENABLE_ESP_GPIO_Port, ENABLE_ESP_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, RESET_ESP_Pin|ENABLE_ESP_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : LED13_Pin */
   GPIO_InitStruct.Pin = LED13_Pin;
@@ -1655,12 +1642,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : ENABLE_ESP_Pin */
-  GPIO_InitStruct.Pin = ENABLE_ESP_Pin;
+  /*Configure GPIO pins : RESET_ESP_Pin ENABLE_ESP_Pin */
+  GPIO_InitStruct.Pin = RESET_ESP_Pin|ENABLE_ESP_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(ENABLE_ESP_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 }
 
