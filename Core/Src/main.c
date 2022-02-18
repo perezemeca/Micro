@@ -40,10 +40,11 @@
 /* USER CODE BEGIN PD */
 
 /************************* Valores MAX-MIN de motores *****************************/
-#define PWMBMAX			4800
 #define PWMAMAX			9000
-#define PWMBMIN			2800
 #define PWMAMIN			4500
+
+#define PWMBMAX			4800
+#define PWMBMIN			2800
 /**********************************************************************************/
 
 /************************* Longitud de respuestas ESP *****************************/
@@ -66,6 +67,8 @@
 #define ResetESP				flag2.bit.b0
 #define SentDataESP				flag2.bit.b1
 #define ECOCIPSEND0xA0			flag2.bit.b2
+#define RespMotor				flag2.bit.b3
+#define SendAlive				flag2.bit.b4
 
 /**********************************************************************************/
 /* USER CODE END PD */
@@ -131,8 +134,8 @@ uint8_t posMINCenter, posMINDerecha, posMINIzquierda;
 uint16_t sensorValue,x2_x1,x2_x3,x2_x1cuad,x2_x3cuad;
 uint32_t error,fx2_fx3,fx2_fx1,denominador;
 /*********************************************************************************/
-/************************************* PID ***************************************/
-uint32_t Proporcional, Integral, Derivativo, PWM, lastError;
+/************************************* PID y PWM***************************************/
+uint32_t Proporcional, Integral, Derivativo, PWM, lastError;//, M1Power, M2Power;
 uint8_t Kp, Ki, Kd;
 //volatile uint8_t TimeOutPID;
 /*********************************************************************************/
@@ -151,7 +154,7 @@ uint8_t DecodeCIPSEND, IndiceIPD, IndiceDisconnect;
 char CantBytes[2];
 uint8_t Estado, Indice, Data;
 /*********************************************************************************/
-_work w;
+_work w, M1Power, M2Power;
 
 volatile _sFlag flag1, flag2;
 
@@ -432,17 +435,20 @@ void DecodeESP(_Rx *RXUSART1){
 //		Reset();
 //	}
 
-	if(espConnected){
+	if((espConnected) && (!DecodeHeaderESP)){
 		//Decodifica \r\n+IPD,
-		if(RXUSART1->Buff[RXUSART1->ir] == IPD[IndiceIPD]){
+		if((RXUSART1->Buff[RXUSART1->ir] == IPD[IndiceIPD]) && (IndiceIPD < 7)){
 			IndiceIPD++;
 			if(IndiceIPD == 7){
 				DecodeIPD = 1;
+				IndiceIPD = 0;
 			}
 		}
 		else{
-			if((IndiceDisconnect > 0) && (!DecodeIPD)){
-				IndiceDisconnect = 0;
+			if((IndiceIPD > 0) && (!DecodeIPD)){
+				IndiceIPD = 0;
+				RXUSART1->ir = RXUSART1->iw;
+				return;
 			}
 		}
 
@@ -450,6 +456,7 @@ void DecodeESP(_Rx *RXUSART1){
 			if(RXUSART1->Buff[RXUSART1->ir]==':'){
 				DecodeHeaderESP = 1;
 				DecodeIPD = 0;
+				return;
 			}
 		}
 
@@ -834,12 +841,14 @@ void DecodeHeader(_Rx *RX)
                     RX->header = 0 ;
                     if(RX->cks == RX->Buff[RX->ir]) {
                         RX->ISCMD = 1;
+                        DecodeHeaderESP = 0;
                     }
                 }
                 break;
 
             default:
                 RX->header = 0;
+                DecodeHeaderESP = 0;
                 break;
         }
         RX->ir &= RX->maskSize;
@@ -858,26 +867,80 @@ void DecodeCmd(_Rx *RX, _Tx *TX){
          */
         case 0xF0:                                                              //Alive
 			if(espConnected){
-				SendUDPData(0xF0, 1);
+				SendAlive = 1;
 			}
 			else{
 	        	PutHeaderOnTx((_Tx *)&TXUSB, 0xF0, 2);
 	            PutByteOnTx((_Tx *)&TXUSB, 0x0D);
 	            PutcksOnTx((_Tx *)&TXUSB);
 			}
-            break;
+		break;
+
+        case 0xA1:
+
+//        	M1Power = GetByteFromRx((_Rx *)&RXUSART1, 1, 0);
+//        	M2Power = GetByteFromRx((_Rx *)&RXUSART1, 1, 0);
+//			PutByteOnTx(&TXUSB, M1Power);
+//			PutByteOnTx(&TXUSB, M2Power);
+//			PutStrOnTx(&TXUSB, "---");
+//			M1Power *= 60;
+//			M2Power *= 60;
+////        	M1Power = PWMAMIN + (45*M1Power);
+////        	M2Power = PWMBMIN + (20*M2Power);
+//			PutByteOnTx(&TXUSB, M1Power);
+//			PutByteOnTx(&TXUSB, M2Power);
+//			PutStrOnTx(&TXUSB, "---");
+        	M1Power.u8[0] = GetByteFromRx((_Rx *)&RXUSART1, 1, 0);
+        	M1Power.u8[1] = GetByteFromRx((_Rx *)&RXUSART1, 1, 0);
+        	M1Power.u8[2] = GetByteFromRx((_Rx *)&RXUSART1, 1, 0);
+        	M1Power.u8[3] = GetByteFromRx((_Rx *)&RXUSART1, 1, 0);
+			//M1Power = PWMAMIN + (45*w.i32);
+        	M2Power.u8[0] = GetByteFromRx((_Rx *)&RXUSART1, 1, 0);
+        	M2Power.u8[1] = GetByteFromRx((_Rx *)&RXUSART1, 1, 0);
+        	M2Power.u8[2] = GetByteFromRx((_Rx *)&RXUSART1, 1, 0);
+        	M2Power.u8[3] = GetByteFromRx((_Rx *)&RXUSART1, 1, 0);
+            //M2Power = PWMBMIN + (20*w.i32);
+
+            if(M1Power.u32 > 0){
+				__HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_1,M1Power.u32);
+			}
+			else{
+				__HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_2,M1Power.u32);
+			}
+
+            if(M2Power.u32 > 0){
+    			__HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_4,M2Power.u32);
+            }
+            else{
+    			__HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_3,M2Power.u32);
+            }
+
+			PutStrOnTx(&TXUSB, "---");
+			PutByteOnTx(&TXUSB, M1Power.u32);
+			PutByteOnTx(&TXUSB, M2Power.u32);
+
+            if(espConnected){
+                RespMotor = 1;
+            }
+            else{
+                PutHeaderOnTx(&TXUSB, 0xA1, 2);
+    			PutByteOnTx(&TXUSB, 0x0D);
+    			PutcksOnTx(&TXUSB);
+            }
+
+        break;
         /*
          * Comando para enviar aviso de error
          */
-        default:
-			if(espConnected){
-				SendUDPData(0xFF, 1);
-			}
-			else{
-	        	PutHeaderOnTx((_Tx *)&TXUSB, 0xFF, 1);
-	            PutcksOnTx((_Tx *)&TXUSB);
-			}
-            break;
+//        default:
+//			if(espConnected){
+//				SendUDPData();
+//			}
+//			else{
+//	        	PutHeaderOnTx((_Tx *)&TXUSB, 0xFF, 1);
+//	            PutcksOnTx((_Tx *)&TXUSB);
+//			}
+//        break;
     }
 }
 
@@ -893,93 +956,41 @@ void PutCIPSENDOnTx(const char * CantDatos){
 void SendUDPData(){
 	switch(Data){
 		case 0:
-			PutCIPSENDOnTx("9");
-			Data++;
+			if(RespMotor || SendAlive){
+				PutCIPSENDOnTx("9");
+				Data++;
+				if(RespMotor){
+					Count200ms = 3;
+					SendAlive = 0;
+				}
+				if(SendAlive) Count200ms = 3;
+			}
 		break;
 
 		case 1:
-			PutHeaderOnTx((_Tx *)&TXUSART1, 0xF0, 2);
-			PutByteOnTx((_Tx *)&TXUSART1, 0x0D);
-			PutcksOnTx((_Tx *)&TXUSART1);
-			Data++;
-		break;
-
-		case 2:
-			PutCIPSENDOnTx("24");
-			Data++;
-		break;
-
-		case 3:
-			PutHeaderOnTx((_Tx *)&TXUSART1, 0xA0, 17);
-			PutBuffOnTx((_Tx *)&TXUSART1, (uint8_t *)&bufADC[iAdc], 16);
-			PutcksOnTx((_Tx *)&TXUSART1);
-			Data = 0;
+			if(RespMotor){
+				PutHeaderOnTx((_Tx *)&TXUSART1, 0xA1, 2);
+			}
+			if(SendAlive){
+				PutHeaderOnTx((_Tx *)&TXUSART1, 0xF0, 2);
+			}
+			if(RespMotor || SendAlive){
+				PutByteOnTx((_Tx *)&TXUSART1, 0x0D);
+				PutcksOnTx((_Tx *)&TXUSART1);
+				Data = 0;
+				if(RespMotor){
+					RespMotor = 0;
+					Count200ms = 3;
+				}
+				if(SendAlive){
+					Count200ms = 3;
+					SendAlive = 0;
+				}
+			}
 		break;
 	}
 }
-//void SendUDPData(uint8_t cmd, uint8_t Time){
-//	switch(cmd){
-//		/*Alive ESP*/
-//		case 0xF0:
-//
-//			if((ECOCIPSEND0xF0) && (!CountAlive)){
-//				PutHeaderOnTx((_Tx *)&TXUSART1, 0xF0, 2);
-//				PutByteOnTx((_Tx *)&TXUSART1, 0x0D);
-//				PutcksOnTx((_Tx *)&TXUSART1);
-//				ECOCIPSEND0xF0 = 0;
-//				CountAlive = 1;
-//				if(RXUSART1.ISCMD){
-//					RXUSART1.ISCMD = 0;
-//				}
-//			}
-//
-//			if((!ECOCIPSEND0xF0) && (!CountAlive)){
-//				PutCIPSENDOnTx(9);
-////				PutStrOnTx((_Tx *)&TXUSART1, CIPSEND);
-////				PutStrOnTx((_Tx *)&TXUSART1, "9");
-////				strcpy(CantBytes, (const char *) 9);
-////				TXUSART1.Buff[TXUSART1.iw++] = '\r';
-////				TXUSART1.iw &= TXUSART1.maskSize;
-////				TXUSART1.Buff[TXUSART1.iw++] = '\n';
-////				TXUSART1.iw &= TXUSART1.maskSize;
-//				ECOCIPSEND0xF0 = 1;
-//				CountAlive = 20;
-//			}
-//
-//		break;
-//		/*
-//		 * Comando para enviar datos IR
-//		 */
-//		case 0xA0:                                                              //Sensores analogicos
-//
-//			if((!Count500ms) && (ECOCIPSEND0xA0)){
-//				PutHeaderOnTx((_Tx *)&TXUSART1, 0xA0, 17);
-//				PutBuffOnTx((_Tx *)&TXUSART1, (uint8_t *)&bufADC[iAdc], 16);
-//				PutcksOnTx((_Tx *)&TXUSART1);
-//				ECOCIPSEND0xA0 = 0;
-//				Count500ms = 1;
-//			}
-//
-//			if((!ECOCIPSEND0xA0) && (!Count500ms)){
-//				PutCIPSENDOnTx(24);
-////				PutStrOnTx((_Tx *)&TXUSART1, CIPSEND);
-////				PutStrOnTx((_Tx *)&TXUSART1, "24");
-////				strcpy(CantBytes, (const char *) 24);
-////				TXUSART1.Buff[TXUSART1.iw++] = '\r';
-////				TXUSART1.iw &= TXUSART1.maskSize;
-////				TXUSART1.Buff[TXUSART1.iw++] = '\n';
-////				TXUSART1.iw &= TXUSART1.maskSize;
-//				ECOCIPSEND0xA0 = 1;
-//				Count500ms = Time;
-//			}
-//
-//		break;
-//
-//		case 0xFF:
-//
-//		break;
-//	}
-//}
+
 
 void PutStrOnTx(_Tx *TX, const char *str)
 {
@@ -1156,6 +1167,8 @@ int main(void)
   Estado = 0;
   Indice = 0;
   SentDataESP = 0;
+  RespMotor = 0;
+  SendAlive = 1;
 
 /***********************************************************************************/
 /***********************************************************************************/
@@ -1210,12 +1223,11 @@ int main(void)
 		  On100ms = 0;
 		  HAL_GPIO_TogglePin(LED13_GPIO_Port, LED13_Pin);
 
-		  if(espConnected){
+		  if(espConnected && (!DecodeHeaderESP)){
 			  if(Count200ms > 0){
 				  Count200ms--;
 			  }
 			  if(!Count200ms){
-				  Count200ms = 1;
 				  SendUDPData();
 			  }
 //			  if(CountAlive > 0){
@@ -1243,6 +1255,7 @@ int main(void)
 			  DecodeTimeOut--;
 		  }
 	  }
+
 
 	  //Recepcion por USB - Decodifica header
 	  if(RXUSB.iw != RXUSB.ir) {
@@ -1286,7 +1299,7 @@ int main(void)
 	  //Si la decodificacion resulta de un dato proveniente de PC, se decodifica header
 	  if(DecodeHeaderESP){
 		  DecodeHeader((_Rx *)&RXUSART1);
-		  DecodeHeaderESP = 0;
+
 	  }
 	  //Recepcion por ESP8266 - Decodifica comando
 	  if(RXUSART1.ISCMD) {
