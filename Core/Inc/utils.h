@@ -18,7 +18,7 @@ typedef struct{
     uint8_t cks;
     uint8_t ckst;
     uint8_t nbytes;					//Nbytes[cantidad de bytes de mi buffer]
-    uint8_t IntPutBytes;
+    uint8_t cmd;
     uint8_t iData;					//iData[indice para saber donde comienzan mis datos;
     uint8_t maskSize;
     uint8_t timeout;
